@@ -5,7 +5,8 @@ const PROFILES = Object.freeze({
   1: Object.freeze({ schemaVersion: 1, directories: DIRECTORIES, templatePath: '00_项目管理/空白模板', exportPrefix: '07_发布资产/', resumePrefix: '00_项目管理/' }),
   2: Object.freeze({ schemaVersion: 2, directories: ['assets', 'sources', 'production', 'deliveries'], templatePath: 'production/空白模板', exportPrefix: 'deliveries/handoff/', resumePrefix: 'deliveries/resume/' }),
 });
-export function layoutFor(project = 1) {
+export function layoutFor(project) {
+  if (project === undefined || project === null) fail('必须明确指定项目或布局版本，不能默认使用旧布局');
   const version = typeof project === 'number' ? project : project.schema_version;
   if (!PROFILES[version]) fail('不支持的项目布局版本；仅支持 schema_version 1 或 2');
   return PROFILES[version];
@@ -14,7 +15,7 @@ export function assetDirectory(project, type, assetId) {
   if (!TYPES.includes(type) || !ASSET_ID.test(assetId) || assetId.split('-')[1] !== type) fail('资产目录需要匹配的类型和编号');
   return layoutFor(project).schemaVersion === 2 ? `assets/${type}/${assetId}` : `${V1_CATEGORY[type]}/${assetId}`;
 }
-export function workingPath(root, relative, project = 1, entry) {
+export function workingPath(root, relative, project, entry) {
   const normalized = String(relative).replaceAll('\\', '/');
   if (normalized.split('/')[0] === SYSTEM || normalized === 'project.json') fail(`工作资产不能使用系统路径：${relative}`);
   if (layoutFor(project).schemaVersion === 2) {

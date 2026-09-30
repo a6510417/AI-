@@ -13,8 +13,8 @@ const HELP = `原创 IP 本地辅助工具（零依赖）
   record-review --project <项目目录> --asset <资产ID> --version 1.0.0 --file <项目内审核输入.json>
   adopt --project <项目目录> --asset <资产ID> --version 1.0.0 --reason <采用依据> --review <审核ID>（v1 可省略）
   review-item --project <项目目录> --item <复核项ID> --reason <理由> --evidence <核对证据> --method ai --reviewer <审查者>
-  export --project <项目目录> --out deliveries/handoff/交接包v1 [--episodes <ID,ID> | --chapters <ID,ID>] [--require-review]
-  resume --project <项目目录> --out deliveries/resume/续作包v1
+  export --project <项目目录> --out deliveries/handoff/交接包 [--episodes <ID,ID> | --chapters <ID,ID>] [--require-review]
+  resume --project <项目目录> --out deliveries/resume/续作包
   retire-asset --project <v2项目> --asset <未采用候选ID> --reason <弃用理由>
   restore-asset --project <v2项目> --asset <退役候选ID> --reason <恢复理由>
   migration-preflight --project <v1项目> --to <新的v2项目目录>
@@ -23,7 +23,7 @@ const HELP = `原创 IP 本地辅助工具（零依赖）
   render-report --project <项目目录> --asset <REPORT-ID> --version <版本> --out deliveries/views/<新阅读目录>
   v1 导出及续作保持 07_发布资产/ 与 00_项目管理/；v2 导出始终要求章节完整审核。
   不带参数：中文菜单；--help：本说明；--json：输出机器可读 JSON。
-路径或名称含空格时请加引号。详细字段见 docs/数据协议.md；命令说明见 docs/接口规范.md。`;
+路径或名称含空格时请加引号。详细字段见 studio/docs/数据协议.md；命令说明见 studio/docs/接口规范.md。`;
 function printResult(result, asJSON = false) {
   if (asJSON) { console.log(jsonText(result).trimEnd()); return; }
   console.log(result.ok ? '完成' : '检查未通过');
@@ -102,17 +102,17 @@ async function menu() {
             const range = await ask('导出范围：全部、剧集或章节', '全部');
             if (!['全部', '剧集', '章节'].includes(range)) fail('范围请输入全部、剧集或章节');
             const ids = range === '全部' ? undefined : await ask('完整资产 ID，多个用逗号分隔');
-            result = exportProject({ project: selectedProject, out: await ask('新的导出目录', `${profile.exportPrefix}交接包v1`), episodes: range === '剧集' ? ids : undefined, chapters: range === '章节' ? ids : undefined, requireReview: profile.schemaVersion === 2 || (await ask('要求完整内容审核通过？是／否', '是')) === '是' });
+            result = exportProject({ project: selectedProject, out: await ask('新的导出目录', `${profile.exportPrefix}交接包`), episodes: range === '剧集' ? ids : undefined, chapters: range === '章节' ? ids : undefined, requireReview: profile.schemaVersion === 2 || (await ask('要求完整内容审核通过？是／否', '是')) === '是' });
           }
           if (choice === '7') result = newAsset({ project: selectedProject, type: await ask(`类型（${TYPES.join('/')}）`), title: await ask('资产标题'), sequence: (await ask('序号（留空自动编号）')) || undefined });
           if (choice === '8') result = projectStatus({ project: selectedProject });
-          if (choice === '9') result = resumeProject({ project: selectedProject, out: await ask('新的续作包目录', `${profile.resumePrefix}续作包v1`) });
+          if (choice === '9') result = resumeProject({ project: selectedProject, out: await ask('新的续作包目录', `${profile.resumePrefix}续作包`) });
           if (choice === '10') result = recordReview({ project: selectedProject, asset: await ask('被审资产 ID'), version: await ask('已保存版本'), file: await ask('真实审核输入 JSON 的项目内相对路径') });
           if (choice === '11') result = reviewItem({ project: selectedProject, item: await ask('status列出的完整复核项 ID'), reason: await ask('保留旧版的理由'), evidence: await ask('实际核对证据'), method: await ask('实际审核方式 ai 或 human'), reviewer: await ask('实际审查者') });
           if (choice === '12' || choice === '13') result = (choice === '12' ? retireAsset : restoreAsset)({ project: selectedProject, asset: await ask('候选资产 ID'), reason: await ask('本次退役或恢复理由') });
           if (choice === '14' || choice === '15') result = await dispatch(choice === '14' ? 'migration-preflight' : 'migrate', { project: selectedProject, to: await ask('新的目标项目目录') });
           if (choice === '16') result = await dispatch('audit-links', { project: selectedProject });
-          if (choice === '17') result = await dispatch('render-report', { project: selectedProject, asset: await ask('REPORT 资产 ID'), version: await ask('已保存版本'), out: await ask('新的报告阅读目录', 'deliveries/views/报告阅读v1') });
+          if (choice === '17') result = await dispatch('render-report', { project: selectedProject, asset: await ask('REPORT 资产 ID'), version: await ask('已保存版本'), out: await ask('新的报告阅读目录', 'deliveries/views/报告阅读') });
         } else fail('请输入菜单中的数字');
         printResult(result);
       } catch (error) { console.error(`未完成：${error.message}`); }

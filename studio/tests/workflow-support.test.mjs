@@ -127,13 +127,16 @@ test('审核要求真实范围、审查人和证据；联合、伪时间、重�
   assert.throws(() => normalizeReviewRecord(review(), { ...context, manifestSha256: '' }), /manifest_sha256/);
 });
 
-test('中文输入可兼容，输出只使用规范英文，修改稿未复查不误关问题', () => {
-  const input = { reviewer_kind: '人工', reviewer: '实际检查者（测试夹具）', scope: '全文', coverage: 'full', conclusion: '需修订', issues: [{ id: '问题一', severity: '应修订', status: '已实际应用待复查', description: '需要复查修改稿', evidence: '已收到替换段落但尚未对照。' }], evidence: '仅形成问题报告。' };
+test('规范字段接受中文枚举，旧字段拒绝，修改稿未复查不误关问题', () => {
+  const input = { method: '人工', reviewer: '实际检查者（测试夹具）', scope: '全文', coverage: 'full', result: '需修订', issues: [{ id: '问题一', severity: '应修订', status: '已实际应用待复查', description: '需要复查修改稿', evidence: '已收到替换段落但尚未对照。' }], evidence: '仅形成问题报告。' };
   const record = normalizeReviewRecord(input, context);
   assert.equal(record.method, 'human'); assert.equal(record.result, 'revise');
   assert.equal(record.issues[0].severity, 'revision'); assert.equal(record.issues[0].status, 'open');
   assert.equal(Object.hasOwn(record, 'reviewer_kind'), false);
-  assert.throws(() => normalizeReviewRecord({ ...input, method: 'ai' }, context), /不一致/);
+  assert.throws(() => normalizeReviewRecord({ ...input, method: undefined, reviewer_kind: '人工' }, context), /请使用 method/);
+  assert.throws(() => normalizeReviewRecord({ ...input, reviewer_kind: '人工' }, context), /请使用 method/);
+  assert.throws(() => normalizeReviewRecord({ ...input, result: undefined, conclusion: '需修订' }, context), /请使用 result/);
+  assert.throws(() => normalizeReviewRecord({ ...input, conclusion: '需修订' }, context), /请使用 result/);
 });
 
 test('复核稳定ID覆盖确切上下游版本及via，忽略描述顺序和刷新时间', () => {

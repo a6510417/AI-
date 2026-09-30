@@ -41,13 +41,8 @@ function enumValue(value, values, aliases, field) {
   return translated;
 }
 function methodOf(input) {
-  const method = input.method ?? input.reviewer_kind;
-  const normalized = enumValue(method, ['ai', 'human'], { AI: 'ai', 人工: 'human' }, 'method');
-  if (input.method !== undefined && input.reviewer_kind !== undefined) {
-    const alias = enumValue(input.reviewer_kind, ['ai', 'human'], { AI: 'ai', 人工: 'human' }, 'reviewer_kind');
-    if (alias !== normalized) fail('method 与 reviewer_kind 不一致');
-  }
-  return normalized;
+  if (Object.hasOwn(input, 'reviewer_kind')) fail('请使用 method 字段，不接受 reviewer_kind');
+  return enumValue(input.method, ['ai', 'human'], { AI: 'ai', 人工: 'human' }, 'method');
 }
 function equalityWhenProvided(input, key, expected) {
   if (input[key] !== undefined && input[key] !== expected) fail(`${key} 与指定的确切资产／版本或记录上下文不一致`);
@@ -144,8 +139,8 @@ export function normalizeReviewRecord(input, { reviewId, projectId, assetId, ver
   timestamp(recordedAt, 'recorded_at');
   for (const [key, expected] of Object.entries({ review_id: reviewId, project_id: projectId, asset_id: assetId, version, manifest_sha256: manifestSha256, recorded_at: recordedAt })) equalityWhenProvided(input, key, expected);
   if (input.schema_version !== undefined && input.schema_version !== 1) fail('审核 schema_version 必须为 1');
-  const result = enumValue(input.result ?? input.conclusion, ['pass', 'revise', 'unverified'], { 通过: 'pass', 需修订: 'revise', 待核实: 'unverified', 不适用: 'unverified' }, 'result');
-  if (input.result !== undefined && input.conclusion !== undefined && enumValue(input.conclusion, ['pass', 'revise', 'unverified'], { 通过: 'pass', 需修订: 'revise', 待核实: 'unverified', 不适用: 'unverified' }, 'conclusion') !== result) fail('result 与 conclusion 不一致');
+  if (Object.hasOwn(input, 'conclusion')) fail('请使用 result 字段，不接受 conclusion');
+  const result = enumValue(input.result, ['pass', 'revise', 'unverified'], { 通过: 'pass', 需修订: 'revise', 待核实: 'unverified', 不适用: 'unverified' }, 'result');
   const coverage = enumValue(input.coverage ?? 'partial', ['full', 'partial'], {}, 'coverage');
   if (!Array.isArray(input.issues)) fail('issues 必须为数组，没有问题时填写 []');
   const ids = new Set();

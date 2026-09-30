@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { initProject, newAsset, saveVersion, recordReview, adoptVersion, exportProject, resumeProject, retireAsset, restoreAsset, projectStatus, validateProject, validateMigratingProject, CHAPTER_FILES } from '../src/project-service.mjs';
 import { safePath } from '../src/storage.mjs';
-import { workingPath } from '../src/layout.mjs';
+import { workingPath, layoutFor } from '../src/layout.mjs';
 import { normalizeReviewRecord, assertReviewPasses, mediaFileErrors } from '../src/rules.mjs';
 import { dispatch } from '../src/cli.mjs';
 
@@ -84,6 +84,9 @@ test('v2只迁工作目录形状，资产及七文件保持v1身份和原快照�
 test('v2路径拒绝类型/ID不匹配、旧目录、嵌套资产、越界和控制字符', t => {
   const { project } = fixture(t);
   const context = registry(project);
+  assert.throws(() => layoutFor(), /必须明确指定项目/);
+  assert.throws(() => layoutFor(null), /必须明确指定项目/);
+  assert.throws(() => workingPath(project, '03_小说资产/章节001'), /必须明确指定项目/);
   for (const relative of ['assets/CH/IP700-WORLD-001', 'assets/CH/IP700-CH-001/sub', '03_小说资产/章节001', 'assets/CH/../WORLD', 'assets/CH/IP700-CH-001\n']) assert.throws(() => workingPath(project, relative, context));
   assert.throws(() => safePath(project, 'a\nb.png'));
   assert.throws(() => safePath(project, '../outside'));
