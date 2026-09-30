@@ -1,0 +1,6 @@
+interface:
+  display_name: "声音导演与制作"
+  short_description: "为本项目安排角色声线对白音乐音效，检查真实声音并交接分轨"
+
+policy:
+  allow_implicit_invocation: true

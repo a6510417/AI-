@@ -1,0 +1,12 @@
+/projects/
+/sources/
+/backups/
+/releases/*
+!/releases/README.md
+/archive/docs/
+/archive/legacy-assistant/
+/archive/evidence/
+/.cache/
+/node_modules/
+*.log
+*.tmp

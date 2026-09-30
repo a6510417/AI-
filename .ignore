@@ -1,0 +1,12 @@
+backups/
+archive/docs/
+archive/legacy-assistant/
+archive/evidence/
+releases/
+sources/inbox/
+.cache/
+node_modules/
+projects/**/.ip-system/
+projects/**/deliveries/
+projects/**/production/history/
+projects/**/production/legacy/

@@ -1,0 +1,12 @@
+{
+  "name": "comic-studio-workspace",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "studio": "node studio/bin/studio.mjs",
+    "test": "node --test studio/tests/*.test.mjs",
+    "check:docs": "node studio/maintenance/verify-workspace.mjs"
+  }
+}

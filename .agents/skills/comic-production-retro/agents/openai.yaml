@@ -1,0 +1,6 @@
+interface:
+  display_name: "生产与发行复盘"
+  short_description: "根据本项目真实尝试费用和发行数据复盘，提出下一轮可验证改进"
+
+policy:
+  allow_implicit_invocation: true

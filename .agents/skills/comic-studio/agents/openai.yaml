@@ -1,0 +1,6 @@
+interface:
+  display_name: "漫剧工作室总控"
+  short_description: "为本项目分配创作与制作阶段，按需读取手册并形成真实成果交接"
+
+policy:
+  allow_implicit_invocation: true

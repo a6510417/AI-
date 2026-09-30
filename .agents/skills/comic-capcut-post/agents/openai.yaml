@@ -1,0 +1,6 @@
+interface:
+  display_name: "剪映专业版后期交付"
+  short_description: "为本项目整理剪映工程取用转场字幕声轨，核对成片交付与检查"
+
+policy:
+  allow_implicit_invocation: true
