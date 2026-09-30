@@ -19,7 +19,7 @@ const event = () => ref('CH', '1.0.0', { event_id: 'E01' });
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), '原创IP_中文 测试_'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const project = initProject({ root, id: 'IP900', name: '测试 故事' }).project;
+  const project = initProject({ root, id: 'IP900', name: '测试 故事', schemaVersion: 1 }).project;
   return { root, project };
 }
 function assetPath(project, type, number = '001') {

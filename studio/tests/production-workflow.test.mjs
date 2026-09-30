@@ -18,7 +18,7 @@ let reviewCounter = 0;
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'IP_开工 缺陷回归_'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  return { root, project: initProject({ root, id: 'IP800', name: '续作测试' }).project };
+  return { root, project: initProject({ root, id: 'IP800', name: '续作测试', schemaVersion: 1 }).project };
 }
 function entry(project, assetId) { return json(path.join(project, 'project.json')).assets.find(item => item.asset_id === assetId); }
 function work(project, assetId) { return path.join(project, entry(project, assetId).path); }

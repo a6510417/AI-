@@ -1,6 +1,6 @@
 interface:
   display_name: "声音导演与制作"
-  short_description: "为本项目安排角色声线对白音乐音效，检查真实声音并交接分轨"
+  short_description: "设计漫剧角色声线与对白读法，安排配音音乐音效并交接声音素材"
 
 policy:
   allow_implicit_invocation: true

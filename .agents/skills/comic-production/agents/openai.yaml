@@ -1,6 +1,6 @@
 interface:
   display_name: "制片排期与成本"
-  short_description: "为本项目整理制作任务排期依赖与预算，依据实测管理生成尝试"
+  short_description: "规划漫剧制作任务、负责人、依赖和排期，估算成本与生成尝试预算"
 
 policy:
   allow_implicit_invocation: true

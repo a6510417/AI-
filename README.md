@@ -21,7 +21,7 @@ node studio/bin/studio.mjs validate --project "projects/IP001_大反派今天也
 
 继续制作先读状态，再读取对应采用快照。项目入口是带读取时点的导航，不替代采用指针。图片、视频、声音与成片分别按实际检查范围验收。
 
-新项目使用布局 v2：资产按类型与编号保存，制作记录放 `production/`，交付包放 `deliveries/`。旧布局 v1 继续可读，旧工具路径 `AI漫剧导演助手/tools/ip-tool.mjs` 保留兼容。
+新项目的资产按类型与编号保存，制作记录放 `production/`，交付包放 `deliveries/`。日常操作统一使用 `studio/bin/studio.mjs`。
 
 ## 维护
 

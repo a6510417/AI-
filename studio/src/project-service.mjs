@@ -12,7 +12,6 @@ import { reviewRecord, reviewForSnapshot } from './reviews.mjs';
 import { copySnapshot, handoffMarkdown, dataMarkdown } from './output.mjs';
 import { renderPackageLinks } from './links.mjs';
 export { DIRECTORIES, CHAPTER_FILES, TYPES, safePath };
-export { main } from './cli.mjs';
 function renderStagedViews(root, project, staged, indexName, warnings) {
   if (project.schema_version !== 2) return;
   const transactionToken = readJSON(safePath(root, `${SYSTEM}/write.lock`)).token;
@@ -23,7 +22,7 @@ function renderStagedViews(root, project, staged, indexName, warnings) {
   index.warnings = [...warnings];
   atomicJSON(filename, index);
 }
-export function initProject({ root = 'projects', id, name, schemaVersion = 1 }) {
+export function initProject({ root = 'projects', id, name, schemaVersion = 2 }) {
   const profile = layoutFor(schemaVersion);
   if (!/^IP\d+$/.test(id ?? '')) fail('项目 ID 必须为 IP 加数字，例如 IP003');
   if (!filled(name) || /[<>:"/\\|?*\x00-\x1F]/.test(name) || /[ .]$/.test(name) || name.length > 80) fail('项目名称不能为空，不可含路径或 Windows 文件名非法字符，且不超过 80 字符');

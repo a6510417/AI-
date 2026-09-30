@@ -1,6 +1,6 @@
 interface:
   display_name: "素材来源与发布检查"
-  short_description: "核对本项目改编图片声音素材的来源及范围，完成实际发布前检查"
+  short_description: "核对漫剧改编与图片声音素材的来源和使用范围，检查发布前证据"
 
 policy:
   allow_implicit_invocation: true

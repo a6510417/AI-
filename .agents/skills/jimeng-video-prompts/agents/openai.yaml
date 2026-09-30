@@ -1,6 +1,6 @@
 interface:
   display_name: "即梦分镜运镜提示词"
-  short_description: "为本项目编写即梦双版本分镜运镜正文，核对入口模式及真实参考"
+  short_description: "编写漫剧即梦视频提示词与分镜运镜方案，核对版本模式和参考输入"
 
 policy:
   allow_implicit_invocation: true

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 
-// Pure workflow helpers. Filesystem checks and durable writes belong to ip-tool.mjs.
+// Pure workflow helpers. Filesystem checks and durable writes belong to project-service.mjs.
 export const ASSET_TYPES = Object.freeze(['WORLD', 'CHAR', 'LOC', 'PROP', 'PLOT', 'STATE', 'CH', 'EP', 'SC', 'SHOT', 'PROMPT', 'MEDIA', 'REPORT']);
 const TYPE_PART = ASSET_TYPES.join('|');
 export const ASSET_ID = new RegExp(`^IP\\d+-(${TYPE_PART})-\\d{3,}$`);

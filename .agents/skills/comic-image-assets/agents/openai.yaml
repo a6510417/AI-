@@ -1,6 +1,6 @@
 interface:
   display_name: "GPT图片资产生产"
-  short_description: "按本项目采用基准制作人物场景与关键帧，检查真实图片及参考职责"
+  short_description: "制作或编辑漫剧人物、场景、道具和关键帧，核对视觉参考与一致性"
 
 policy:
   allow_implicit_invocation: true

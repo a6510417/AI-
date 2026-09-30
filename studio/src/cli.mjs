@@ -5,7 +5,7 @@ import { readProject } from './registry.mjs';
 import { layoutFor } from './layout.mjs';
 const HELP = `原创 IP 本地辅助工具（零依赖）
 用法：node studio/bin/studio.mjs <命令> [参数]
-  init --root projects --id IP003 --name 新故事 [--schema 1|2]（新入口默认 v2）
+  init --root projects --id IP003 --name 新故事 [--schema 1|2]（默认 v2）
   new-asset --project <项目目录> --type CH --title 第一章 [--sequence 001]
   status --project <项目目录>
   validate --project <项目目录> [--strict]
@@ -60,7 +60,7 @@ function parseArgs(args) {
   }
   return result;
 }
-export async function dispatch(command, options, { defaultSchema = 1 } = {}) {
+export async function dispatch(command, options) {
   const permitted = { init: ['root', 'id', 'name', 'schema'], 'new-asset': ['project', 'type', 'title', 'sequence'], status: ['project'], resume: ['project', 'out'], validate: ['project', 'strict'], 'save-version': ['project', 'asset', 'path', 'reason'], 'record-review': ['project', 'asset', 'version', 'file'], 'review-item': ['project', 'item', 'reason', 'evidence', 'method', 'reviewer'], adopt: ['project', 'asset', 'version', 'reason', 'review'], export: ['project', 'out', 'episodes', 'chapters', 'require-review'], 'retire-asset': ['project', 'asset', 'reason'], 'restore-asset': ['project', 'asset', 'reason'], 'migration-preflight': ['project', 'to'], migrate: ['project', 'to'], 'audit-links': ['project'], 'render-report': ['project', 'asset', 'version', 'out'] };
   if (!permitted[command]) fail(`未知命令 ${command}\n${HELP}`);
   for (const key of Object.keys(options)) if (![...permitted[command], 'json', 'help'].includes(key)) fail(`命令 ${command} 不接受参数 --${key}`);
@@ -74,9 +74,9 @@ export async function dispatch(command, options, { defaultSchema = 1 } = {}) {
     const links = await import('./links.mjs');
     return links[command === 'audit-links' ? 'auditLinks' : 'renderReport'](options);
   }
-  return handlers[command]({ ...options, schemaVersion: options.schema === undefined ? defaultSchema : Number(options.schema), requireReview: options['require-review'] === true });
+  return handlers[command]({ ...options, schemaVersion: options.schema === undefined ? undefined : Number(options.schema), requireReview: options['require-review'] === true });
 }
-async function menu({ defaultSchema = 1 } = {}) {
+async function menu() {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let selectedProject = '';
   const ask = async (prompt, fallback = '') => (await rl.question(`${prompt}${fallback ? `［${fallback}］` : ''}：`)).trim() || fallback;
@@ -88,7 +88,7 @@ async function menu({ defaultSchema = 1 } = {}) {
       try {
         let result;
         if (choice === '1') {
-          result = initProject({ root: await ask('项目根目录', 'projects'), id: await ask('项目 ID（如 IP003）'), name: await ask('项目名称'), schemaVersion: defaultSchema });
+          result = initProject({ root: await ask('项目根目录', 'projects'), id: await ask('项目 ID（如 IP003）'), name: await ask('项目名称') });
           selectedProject = result.project;
         } else if (['2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'].includes(choice)) {
           selectedProject = await ask('项目目录', selectedProject);
@@ -119,15 +119,15 @@ async function menu({ defaultSchema = 1 } = {}) {
     }
   } finally { rl.close(); }
 }
-export async function main(args = process.argv.slice(2), { defaultSchema = 1 } = {}) {
+export async function main(args = process.argv.slice(2)) {
   if (Number(process.versions.node.split('.')[0]) < 22) { console.error('本工具需要 Node.js 22 或更新版本，请选择本机已有的新版本。'); process.exitCode = 1; return; }
-  if (!args.length) return menu({ defaultSchema });
+  if (!args.length) return menu();
   if (args[0] === '--help' || args[0] === '-h') { console.log(HELP); return; }
   let options;
   try {
     options = parseArgs(args.slice(1));
     if (options.help) { console.log(HELP); return; }
-    const result = await dispatch(args[0], options, { defaultSchema });
+    const result = await dispatch(args[0], options);
     printResult(result, options.json);
     if (!result.ok) process.exitCode = 1;
   } catch (error) {

@@ -10,6 +10,7 @@ import { initProject, newAsset, saveVersion, recordReview, adoptVersion, exportP
 import { safePath } from '../src/storage.mjs';
 import { workingPath } from '../src/layout.mjs';
 import { normalizeReviewRecord, assertReviewPasses, mediaFileErrors } from '../src/rules.mjs';
+import { dispatch } from '../src/cli.mjs';
 
 const cli = fileURLToPath(new URL('../bin/studio.mjs', import.meta.url));
 const json = filename => JSON.parse(fs.readFileSync(filename, 'utf8'));
@@ -53,10 +54,14 @@ function bridge(project) {
   ]) saveAdopt(project, draft(project, type, data));
 }
 
-test('公开API默认v1，新bin默认v2且可显式初始化v1', t => {
+test('公开API与命令行默认使用工作室布局，旧布局必须显式选择', async t => {
   const { root } = fixture(t);
-  const old = initProject({ root, id: 'IP701', name: 'API默认旧版' });
-  assert.equal(registry(old.project).schema_version, 1);
+  const current = initProject({ root, id: 'IP701', name: 'API默认工作室' });
+  assert.equal(registry(current.project).schema_version, 2);
+  const historical = initProject({ root, id: 'IP704', name: 'API显式旧布局', schemaVersion: 1 });
+  assert.equal(registry(historical.project).schema_version, 1);
+  const routed = await dispatch('init', { root, id: 'IP705', name: '命令分派默认工作室' });
+  assert.equal(registry(routed.project).schema_version, 2);
   for (const [id, flags, expected] of [['IP702', [], 2], ['IP703', ['--schema', '1'], 1]]) {
     const run = spawnSync(process.execPath, [cli, 'init', '--root', root, '--id', id, '--name', 'CLI版本', ...flags, '--json'], { encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr || run.stdout);
