@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { initProject, saveVersion, recordReview, adoptVersion, validateProject, projectStatus, resumeProject } from '../src/project-service.mjs';
 import { migrateProject, migrationPreflight } from '../src/migration.mjs';
 import { auditLinks, renderReport, renderPackageLinks } from '../src/links.mjs';
@@ -117,7 +118,7 @@ test('冻结报告原始坏链接按准确依赖修复到派生视图，源与�
   const audit = auditLinks({ project: f.project });
   assert.equal(audit.ok, true, audit.warnings.join('\n')); assert.equal(audit.stats.raw_broken, 1); assert.equal(audit.stats.resolved, 2);
   assert.equal(audit.resolved.every(item => item.target_version === '1.0.0'), true);
-  const result = renderReport({ project: f.project, asset: 'IP991-REPORT-001', out: 'deliveries/views/test' });
+  const result = renderReport({ project: f.project, asset: 'IP991-REPORT-001', out: 'deliveries/views/test', mode: 'portable' });
   assert.equal(result.ok, true, result.warnings.join('\n'));
   const rendered = path.join(result.output, 'reports/IP991-REPORT-001/1.0.0/制作报告.md');
   const link = /\]\(([^)]+)\)/.exec(fs.readFileSync(rendered, 'utf8'))[1];
@@ -136,7 +137,7 @@ test('迁后报告通过旧source_path映射解析，不猜最新采用版', asy
   const audit = auditLinks({ project: f.target });
   assert.equal(audit.ok, true, audit.warnings.join('\n'));
   assert.equal(audit.resolved.every(item => item.target_version === '1.0.0'), true);
-  const view = renderReport({ project: f.target, asset: 'IP991-REPORT-001', out: 'deliveries/views/exact-old' });
+  const view = renderReport({ project: f.target, asset: 'IP991-REPORT-001', out: 'deliveries/views/exact-old', mode: 'portable' });
   assert.equal(view.ok, true); assert.equal(fs.readFileSync(path.join(view.output, 'assets/IP991-MEDIA-001/1.0.0/图像 空格#1.png'), 'utf8'), 'test media bytes version one');
 });
 
@@ -162,6 +163,10 @@ test('续作包新增派生报告视图，包内冻结assets字节保持', t => 
   const before = files(path.join(pack, 'assets'));
   const result = renderPackageLinks({ project: f.project, output: pack });
   assert.equal(result.ok, true, result.warnings.join('\n')); assert.deepEqual(files(path.join(pack, 'assets')), before);
+  assert.equal(fs.existsSync(path.join(pack, 'views/IP991-REPORT-001/1.0.0/assets')), false);
+  const markdown = path.join(pack, 'views/IP991-REPORT-001/1.0.0/reports/IP991-REPORT-001/1.0.0/制作报告.md');
+  const link = /\]\(([^)]+)\)/.exec(fs.readFileSync(markdown, 'utf8'))[1];
+  assert.equal(path.resolve(path.dirname(markdown), decodeURIComponent(link)), path.join(pack, 'assets/IP991-MEDIA-001/1.0.0/图像 空格#1.png'));
   const body = fs.readFileSync(path.join(pack, '续作说明.md'), 'utf8'); assert.match(body, /报告阅读视图/);
 });
 
@@ -217,7 +222,7 @@ test('根报告引用的历史说明未声明媒体依赖时生成明确诊断�
   metadata.version = '1.1.0'; write(path.join(f.report, 'asset.json'), metadata);
   fs.writeFileSync(path.join(f.report, '制作报告.md'), '# 当前报告\n\n[正式图片](../../05_视觉资产/IP991-MEDIA-001/图像%20空格%231.png)\n[历史说明](../../.ip-system/snapshots/IP991-REPORT-001/1.0.1/制作报告.md)\n'); f.adopt('REPORT', f.reportPath);
   const before = files(path.join(f.project, '.ip-system'));
-  const result = renderReport({ project: f.project, asset: 'IP991-REPORT-001', out: 'deliveries/views/history-diagnosis' });
+  const result = renderReport({ project: f.project, asset: 'IP991-REPORT-001', out: 'deliveries/views/history-diagnosis', mode: 'portable' });
   assert.equal(result.ok, true, result.errors.join('\n')); assert.equal(result.root_issues.length, 0); assert.equal(result.historical_issues.length, 1);
   const issue = result.historical_issues[0]; assert.equal(issue.asset_id, 'IP991-REPORT-001'); assert.equal(issue.version, '1.0.1'); assert.equal(issue.scope, 'historical'); assert.match(issue.reason, /未列入精确依赖/);
   assert.equal(result.warnings.some(message => message.includes('IP991-MEDIA-002')), true);
@@ -240,4 +245,75 @@ test('根报告引用的历史说明未声明媒体依赖时生成明确诊断�
   assert.match(chineseDescription, /根报告未定位 0 项，引用的历史说明未定位 1 项/);
   assert.match(chineseDescription, /素材仍为未定位/); assert.match(chineseDescription, /未列入精确依赖/);
   assert.equal(chineseDescription.includes(`](${packaged.historical_issues[0].issue_page})`), true);
+});
+
+test('本地阅读视图不复制assets，所有附件固定到原版本且保存可核查哈希', t => {
+  const f = fixture(t), before = files(path.join(f.project, '.ip-system'));
+  const local = renderReport({ project: f.project, asset: 'IP991-REPORT-001', version: '1.0.0', out: 'deliveries/views/local' });
+  assert.equal(local.ok, true, local.errors.join('\n')); assert.equal(local.mode, 'local');
+  assert.equal(fs.existsSync(path.join(local.output, 'assets')), false);
+  const record = read(path.join(local.output, 'view.json'));
+  assert.equal(record.mode, 'local'); assert.equal(record.source_manifest_sha256, local.source_manifest_sha256);
+  const source = record.sources.find(item => item.asset_id === 'IP991-MEDIA-001');
+  assert.equal(source.version, '1.0.0');
+  assert.equal(path.resolve(local.output, source.path), path.join(f.project, '.ip-system/snapshots/IP991-MEDIA-001/1.0.0'));
+  assert.equal(source.manifest_sha256, hash(fs.readFileSync(path.resolve(local.output, source.path, '_snapshot.json'))));
+  const markdown = path.join(local.output, 'reports/IP991-REPORT-001/1.0.0/制作报告.md');
+  const link = /\]\(([^)]+)\)/.exec(fs.readFileSync(markdown, 'utf8'))[1], target = path.resolve(path.dirname(markdown), decodeURIComponent(link));
+  assert.equal(target, path.join(f.project, '.ip-system/snapshots/IP991-MEDIA-001/1.0.0/图像 空格#1.png'));
+  assert.deepEqual(files(path.join(f.project, '.ip-system')), before);
+  const media = read(path.join(f.media, 'asset.json')); media.version = '1.1.0'; write(path.join(f.media, 'asset.json'), media);
+  fs.writeFileSync(path.join(f.media, '图像 空格#1.png'), 'new adopted version bytes'); f.adopt('MEDIA', f.mediaPath);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'test media bytes version one');
+  assert.match(fs.readFileSync(path.join(local.output, '阅读说明.md'), 'utf8'), /不含 assets 副本/);
+  assert.equal(renderReport({ project: f.project, asset: 'IP991-REPORT-001', out: 'deliveries/views/invalid-mode', mode: 'floating' }).ok, false);
+  assert.equal(fs.existsSync(path.join(f.project, 'deliveries/views/invalid-mode')), false);
+});
+
+test('显式便携阅读包移出项目后仍从自身固定assets读取', t => {
+  const f = fixture(t);
+  const portable = renderReport({ project: f.project, asset: 'IP991-REPORT-001', version: '1.0.0', out: 'deliveries/views/portable', mode: 'portable' });
+  assert.equal(portable.ok, true, portable.errors.join('\n')); assert.equal(portable.mode, 'portable');
+  const moved = path.join(f.root, 'moved-portable'); fs.renameSync(portable.output, moved);
+  const markdown = path.join(moved, 'reports/IP991-REPORT-001/1.0.0/制作报告.md');
+  const link = /\]\(([^)]+)\)/.exec(fs.readFileSync(markdown, 'utf8'))[1];
+  assert.equal(fs.readFileSync(path.resolve(path.dirname(markdown), decodeURIComponent(link)), 'utf8'), 'test media bytes version one');
+  assert.equal(read(path.join(moved, 'view.json')).mode, 'portable');
+  assert.equal(fs.existsSync(path.join(moved, 'reports/IP991-REPORT-001/1.0.0/asset.json')), false);
+});
+
+test('resume默认只打包一次冻结资产，阅读视图仅显式生成并复用包内assets', t => {
+  const f = fixture(t);
+  const simple = resumeProject({ project: f.project, out: '00_项目管理/默认续作' });
+  assert.equal(simple.ok, true); assert.equal(simple.reading_views, false);
+  assert.equal(read(path.join(simple.output, '续作信息.json')).reading_views, false);
+  assert.equal(fs.existsSync(path.join(simple.output, 'views')), false);
+  const readable = resumeProject({ project: f.project, out: '00_项目管理/阅读续作', readingViews: true });
+  assert.equal(readable.ok, true); assert.equal(readable.reading_views, true);
+  assert.equal(fs.existsSync(path.join(readable.output, 'views/IP991-REPORT-001/1.0.0/assets')), false);
+  const view = read(path.join(readable.output, 'views/阅读视图.json'));
+  assert.equal(view.mode, 'package'); assert.equal(view.reports.length, 1);
+  const source = view.reports[0].sources.find(item => item.asset_id === 'IP991-MEDIA-001');
+  assert.equal(path.resolve(readable.output, view.reports[0].path, source.path), path.join(readable.output, 'assets/IP991-MEDIA-001/1.0.0'));
+  assert.throws(() => resumeProject({ project: f.project, out: '00_项目管理/错误选项', readingViews: 'true' }), /布尔值/);
+});
+
+test('阅读视图复用已打包资产仍校验原始字节，发现不同内容不补盖', t => {
+  const f = fixture(t), pack = resumeProject({ project: f.project, out: '00_项目管理/损坏资产测试' }).output;
+  const target = path.join(pack, 'assets/IP991-MEDIA-001/1.0.0/图像 空格#1.png'); fs.writeFileSync(target, 'altered packaged evidence');
+  const result = renderPackageLinks({ project: f.project, output: pack });
+  assert.equal(result.ok, false); assert.match(result.errors.join('\n'), /已有不同内容/);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'altered packaged evidence');
+});
+
+test('CLI接受显式reading-views与local/portable模式并拒绝未知模式', t => {
+  const f = fixture(t), cli = path.resolve('studio/bin/studio.mjs');
+  const run = (command, args) => spawnSync(process.execPath, [cli, command, '--project', f.project, ...args, '--json'], { encoding: 'utf8' });
+  const resumed = run('resume', ['--out', '00_项目管理/CLI阅读', '--reading-views']);
+  assert.equal(resumed.status, 0, resumed.stdout); assert.equal(JSON.parse(resumed.stdout).reading_views, true);
+  assert.equal(fs.existsSync(path.join(JSON.parse(resumed.stdout).output, 'views/阅读视图.json')), true);
+  const rendered = run('render-report', ['--asset', 'IP991-REPORT-001', '--version', '1.0.0', '--out', 'deliveries/views/CLI便携', '--mode', 'portable']);
+  assert.equal(rendered.status, 0, rendered.stdout); assert.equal(JSON.parse(rendered.stdout).mode, 'portable');
+  const invalid = run('render-report', ['--asset', 'IP991-REPORT-001', '--out', 'deliveries/views/CLI错误', '--mode', 'latest']);
+  assert.equal(invalid.status, 1); assert.match(JSON.parse(invalid.stdout).errors.join('\n'), /local 或 portable/);
 });

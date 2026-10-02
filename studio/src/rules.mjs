@@ -170,8 +170,8 @@ export function normalizeReviewRecord(input, { reviewId, projectId, assetId, ver
 export function assertReviewPasses(record, { assetId, version, manifestSha256 }) {
   if (!object(record)) fail('缺少可验证的审核记录');
   const normalized = normalizeReviewRecord(record, { reviewId: record.review_id, projectId: record.project_id, assetId, version, manifestSha256, recordedAt: record.recorded_at });
-  if (normalized.coverage !== 'full') fail('正式采用／发布审核需要 full 完整范围，局部审查不能代替全章审核');
-  if (normalized.result !== 'pass') fail('审核结论尚未通过，不能作为正式采用／发布依据');
+  if (normalized.coverage !== 'full') fail('正式采用／章节交接需要 full 完整范围，局部审查不能代替完整审核');
+  if (normalized.result !== 'pass') fail('审核结论尚未通过，不能作为正式采用／章节交接依据');
   return normalized;
 }
 

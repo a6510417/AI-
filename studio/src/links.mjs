@@ -156,10 +156,10 @@ export function auditLinks({ project }) {
 }
 
 function copySnapshot(snapshot, output) {
-  const target = path.join(output, 'assets', snapshot.asset.asset_id, snapshot.asset.version);
+  const target = safe(output, `assets/${snapshot.asset.asset_id}/${snapshot.asset.version}`);
   fs.mkdirSync(target, { recursive: true });
   for (const filename of [...Object.keys(snapshot.manifest.files), '_snapshot.json']) {
-    const destination = path.join(target, filename); fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const destination = safe(target, filename); fs.mkdirSync(path.dirname(destination), { recursive: true });
     const bytes = fs.readFileSync(path.join(snapshot.directory, filename));
     const expected = filename === '_snapshot.json' ? { sha256: snapshot.saved.manifest_sha256 } : snapshot.manifest.files[filename];
     if (hash(bytes) !== expected.sha256 || (expected.size !== undefined && bytes.length !== expected.size)) throw new Error(`派生复制期间冻结来源发生变化：${snapshot.asset.asset_id}@${snapshot.asset.version}/${filename}`);
@@ -169,10 +169,17 @@ function copySnapshot(snapshot, output) {
   return target;
 }
 
-function renderInto(ctx, report, output) {
+function renderInto(ctx, report, output, { snapshotDirectory = snapshot => copySnapshot(snapshot, output), mode = 'portable' } = {}) {
   const warnings = [], rootIssues = [], historicalIssues = [], rendered = new Map(), copied = new Map(), queue = [report];
   const rootIdentity = key(report.asset);
-  const add = snapshot => { const identity = key(snapshot.asset); if (!copied.has(identity)) { try { copySnapshot(snapshot, output); } catch (error) { error.render_io = true; throw error; } copied.set(identity, snapshot); } };
+  const add = snapshot => {
+    const identity = key(snapshot.asset);
+    if (!copied.has(identity)) {
+      try { copied.set(identity, { snapshot, directory: snapshotDirectory(snapshot) }); }
+      catch (error) { error.render_io = true; throw error; }
+    }
+    return copied.get(identity).directory;
+  };
   while (queue.length) {
     const current = queue.shift(), identity = key(current.asset);
     if (rendered.has(identity)) continue;
@@ -181,17 +188,16 @@ function renderInto(ctx, report, output) {
     const directory = path.join(output, 'reports', current.asset.asset_id, current.asset.version);
     fs.mkdirSync(directory, { recursive: true }); rendered.set(identity, directory);
     for (const filename of Object.keys(current.manifest.files)) {
+      // Original metadata and attachments stay at their exact snapshot location.
+      if (!filename.endsWith('.md')) continue;
       const destination = path.join(directory, filename); fs.mkdirSync(path.dirname(destination), { recursive: true });
-      const original = path.join(output, 'assets', current.asset.asset_id, current.asset.version, filename);
-      // Attachments are already present once in assets; only Markdown needs a derived copy.
-      if (!filename.endsWith('.md')) { if (filename === 'asset.json') fs.writeFileSync(destination, fs.readFileSync(original), { flag: 'wx' }); continue; }
+      const original = path.join(add(current), filename);
       const body = fs.readFileSync(original, 'utf8');
       const rewritten = body.replace(/!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]*)\)/g, (whole, raw, offset) => {
         try {
           const answer = resolve(ctx, current, path.join(current.directory, filename), raw, dependencies);
           if (answer.external) return whole;
-          add(answer.snapshot);
-          let target = path.join(output, 'assets', answer.asset_id, answer.version, answer.file);
+          let target = path.join(add(answer.snapshot), answer.file);
           if (answer.snapshot.asset.type === 'REPORT' && answer.file.endsWith('.md')) {
             target = path.join(output, 'reports', answer.asset_id, answer.version, answer.file);
             if (!rendered.has(key(answer.snapshot.asset))) queue.push(answer.snapshot);
@@ -206,7 +212,7 @@ function renderInto(ctx, report, output) {
           const issueId = hash(text({ ...issue, offset })).slice(0, 20);
           issue.issue_page = `link-issues/${issueId}.md`;
           const issuePath = path.join(output, issue.issue_page); fs.mkdirSync(path.dirname(issuePath), { recursive: true });
-          fs.writeFileSync(issuePath, `# 未定位链接说明\n\n内容类型：链接诊断说明。素材状态：未定位。此页不提供素材或验收结论。\n\n报告来源：${identity}\n\n原文位置：${filename}，第 ${issue.line} 行。检查层级：${scope === 'root' ? '本次根报告' : '根报告引用的历史说明'}。\n\n未定位原因：${error.message}\n\n原始链接：\n\n\`\`\`json\n${JSON.stringify(raw)}\n\`\`\`\n\n原冻结正文和原链接已保留在 assets 中；派生阅读链接仅指向本诊断页。工具未选择任何替代素材或推定版本。\n`, { flag: 'wx' });
+          fs.writeFileSync(issuePath, `# 未定位链接说明\n\n内容类型：链接诊断说明。素材状态：未定位。此页不提供素材或验收结论。\n\n报告来源：${identity}\n\n原文位置：${filename}，第 ${issue.line} 行。检查层级：${scope === 'root' ? '本次根报告' : '根报告引用的历史说明'}。\n\n未定位原因：${error.message}\n\n原始链接：\n\n\`\`\`json\n${JSON.stringify(raw)}\n\`\`\`\n\n原冻结正文和原链接保留在${mode === 'local' ? '项目的精确冻结快照' : '包内 assets'}中；派生阅读链接仅指向本诊断页。工具未选择任何替代素材或推定版本。\n`, { flag: 'wx' });
           (scope === 'root' ? rootIssues : historicalIssues).push(issue);
           const url = slash(path.relative(path.dirname(destination), issuePath)).split('/').map(segment => segment === '..' ? segment : encodeSegment(segment)).join('/');
           const label = /^!?\[([^\]\n]*)\]/.exec(whole)?.[1] ?? '未定位链接';
@@ -218,15 +224,17 @@ function renderInto(ctx, report, output) {
     }
   }
   return { reports: [...rendered].map(([identity, directory]) => {
-    const markdown = fs.readdirSync(directory).filter(filename => filename.endsWith('.md'));
-    return { identity, path: slash(path.relative(output, directory)), entrypoint: markdown.includes('制作报告.md') ? '制作报告.md' : markdown[0] ?? 'asset.json' };
-  }), snapshots: copied.size, warnings: [...new Set(warnings)], root_issues: rootIssues, historical_issues: historicalIssues };
+    const markdown = Object.keys(copied.get(identity).snapshot.manifest.files).filter(filename => filename.endsWith('.md'));
+    const original = path.join(copied.get(identity).directory, 'asset.json');
+    return { identity, path: slash(path.relative(output, directory)), entrypoint: markdown.includes('制作报告.md') ? '制作报告.md' : markdown[0] ?? slash(path.relative(directory, original)) };
+  }), snapshots: copied.size, sources: [...copied.values()].map(({ snapshot, directory }) => ({ asset_id: snapshot.asset.asset_id, version: snapshot.asset.version, manifest_sha256: snapshot.saved.manifest_sha256, path: slash(path.relative(output, directory)) })), warnings: [...new Set(warnings)], root_issues: rootIssues, historical_issues: historicalIssues };
 }
 
-/** A new self-contained derived view; immutable originals are copied, never rewritten. */
-export function renderReport({ project, asset, version, out }) {
+/** A fixed-version local view or explicitly portable package; originals are never rewritten. */
+export function renderReport({ project, asset, version, out, mode = 'local' }) {
   let output;
   try {
+    if (!['local', 'portable'].includes(mode)) throw new Error('报告阅读模式必须为 local 或 portable');
     const ctx = context(project), entry = ctx.registry.assets.find(item => item.asset_id === asset && item.type === 'REPORT');
     if (!entry) throw new Error('必须选择已登记的 REPORT');
     const selected = version ?? entry.adopted_version;
@@ -239,12 +247,12 @@ export function renderReport({ project, asset, version, out }) {
     if (!contained(viewsRoot, output) || output === viewsRoot) throw new Error('报告视图输出不能逃出 deliveries/views');
     if (fs.existsSync(output)) throw new Error('报告视图目标已存在，拒绝覆盖');
     fs.mkdirSync(path.dirname(output), { recursive: true }); fs.mkdirSync(output);
-    const result = renderInto(ctx, report, output);
-    const record = { schema_version: 1, source_asset_id: asset, source_version: selected, source_manifest_sha256: report.saved.manifest_sha256, generated_at: new Date().toISOString(), ...result };
+    const result = renderInto(ctx, report, output, { mode, ...(mode === 'local' ? { snapshotDirectory: snapshot => snapshot.directory } : {}) });
+    const record = { schema_version: 1, mode, source_asset_id: asset, source_version: selected, source_manifest_sha256: report.saved.manifest_sha256, generated_at: new Date().toISOString(), ...result };
     fs.writeFileSync(path.join(output, 'view.json'), text(record), { flag: 'wx' });
-    fs.writeFileSync(path.join(output, '阅读说明.md'), `# 报告可移植阅读视图\n\n来源：${asset}@${selected}。assets 保留原冻结字节，reports 为重定位链接的派生阅读文本。\n\n${result.reports.map(item => `- [${item.identity}](${item.path.split('/').map(encodeSegment).join('/')}/${encodeSegment(item.entrypoint)})`).join('\n')}\n\n${result.warnings.length ? `链接检查记录：根报告 ${result.root_issues.length} 项，引用的历史说明 ${result.historical_issues.length} 项。未定位链接指向诊断说明页，素材仍为未定位。\n\n${[...result.root_issues, ...result.historical_issues].map(item => `- [${item.asset_id}@${item.version}/${item.file}:${item.line}](${item.issue_page})：${item.reason}`).join('\n')}` : '全部所解析链接使用准确冻结版本。'}\n`, { flag: 'wx' });
-    return { ok: result.root_issues.length === 0, action: 'render-report', output, report: asset, version: selected, warnings: result.warnings, errors: [], root_issues: result.root_issues, historical_issues: result.historical_issues, stats: { reports: result.reports.length, snapshots: result.snapshots, root_issues: result.root_issues.length, historical_issues: result.historical_issues.length } };
-  } catch (error) { return { ok: false, action: 'render-report', output, report: asset, version, warnings: [], errors: [error.message] }; }
+    fs.writeFileSync(path.join(output, '阅读说明.md'), `# 报告${mode === 'portable' ? '可移植' : '本地'}阅读视图\n\n来源：${asset}@${selected}。模式：${mode}。${mode === 'portable' ? 'assets 保留原冻结字节，可独立携带本目录。' : '原文与附件直接引用本项目的精确冻结快照，不含 assets 副本；移动本目录或原项目后须重新生成视图。'}reports 为重定位链接的派生阅读文本，准确来源路径、版本与哈希见 view.json 的 sources。\n\n${result.reports.map(item => `- [${item.identity}](${`${item.path}/${item.entrypoint}`.split('/').map(encodeSegment).join('/')})`).join('\n')}\n\n${result.warnings.length ? `链接检查记录：根报告 ${result.root_issues.length} 项，引用的历史说明 ${result.historical_issues.length} 项。未定位链接指向诊断说明页，素材仍为未定位。\n\n${[...result.root_issues, ...result.historical_issues].map(item => `- [${item.asset_id}@${item.version}/${item.file}:${item.line}](${item.issue_page})：${item.reason}`).join('\n')}` : '全部所解析链接使用准确冻结版本。'}\n`, { flag: 'wx' });
+    return { ok: result.root_issues.length === 0, action: 'render-report', output, mode, report: asset, version: selected, source_manifest_sha256: report.saved.manifest_sha256, sources: result.sources, warnings: result.warnings, errors: [], root_issues: result.root_issues, historical_issues: result.historical_issues, stats: { reports: result.reports.length, snapshots: result.snapshots, root_issues: result.root_issues.length, historical_issues: result.historical_issues.length } };
+  } catch (error) { return { ok: false, action: 'render-report', output, mode, report: asset, version, warnings: [], errors: [error.message] }; }
 }
 
 /** Add readable report views to a generated package without touching its assets snapshots. */
@@ -273,19 +281,19 @@ export function renderPackageLinks({ project, output, transactionToken }) {
       const entry = ctx.registry.assets.find(asset => asset.asset_id === item.asset_id);
       if (entry?.type !== 'REPORT') continue;
       const reportOutput = path.join(view, item.asset_id, item.version); fs.mkdirSync(reportOutput, { recursive: true });
-      const rendered = renderInto(ctx, ctx.snapshot(item.asset_id, item.version), reportOutput);
+      const rendered = renderInto(ctx, ctx.snapshot(item.asset_id, item.version), reportOutput, { mode: 'package', snapshotDirectory: snapshot => copySnapshot(snapshot, directory) });
       const prefix = slash(path.relative(directory, reportOutput));
       rootIssues.push(...rendered.root_issues.map(issue => ({ ...issue, issue_page: `${prefix}/${issue.issue_page}` })));
       historicalIssues.push(...rendered.historical_issues.map(issue => ({ ...issue, issue_page: `${prefix}/${issue.issue_page}` })));
       warnings.push(...rendered.warnings); reports.push({ asset_id: item.asset_id, version: item.version, path: slash(path.relative(directory, reportOutput)), ...rendered });
     }
-    fs.writeFileSync(path.join(view, '阅读视图.json'), text({ schema_version: 1, generated_at: new Date().toISOString(), reports, warnings, root_issues: rootIssues, historical_issues: historicalIssues }), { flag: 'wx' });
+    fs.writeFileSync(path.join(view, '阅读视图.json'), text({ schema_version: 1, mode: 'package', generated_at: new Date().toISOString(), reports, warnings, root_issues: rootIssues, historical_issues: historicalIssues }), { flag: 'wx' });
     const description = ['交接说明.md', '续作说明.md'].map(name => path.join(directory, name)).find(filename => fs.existsSync(filename));
     if (description && reports.length) {
       const issues = [...rootIssues, ...historicalIssues];
       const diagnostics = issues.length ? `\n## 报告链接检查\n\n根报告未定位 ${rootIssues.length} 项，引用的历史说明未定位 ${historicalIssues.length} 项。下列页面为链接诊断说明，素材仍为未定位；不提供素材或验收结论。\n\n${issues.map(issue => `- [${issue.asset_id}@${issue.version}/${issue.file}:${issue.line}（${issue.scope === 'root' ? '根报告' : '历史说明'}）](${issue.issue_page.split('/').map(encodeSegment).join('/')})：${issue.reason}`).join('\n')}\n` : '';
       fs.appendFileSync(description, `\n## 报告阅读视图\n\n原冻结 assets 字节保留。可移植报告链接见：\n\n${reports.flatMap(item => item.reports.map(report => `- [${report.identity}](${`${item.path}/${report.path}/${report.entrypoint}`.split('/').map(encodeSegment).join('/')})`)).join('\n')}\n${diagnostics}`);
     }
-    return { ok: rootIssues.length === 0, action: 'render-package-links', output: directory, reports, warnings: [...new Set(warnings)], errors: [], root_issues: rootIssues, historical_issues: historicalIssues };
+    return { ok: rootIssues.length === 0, action: 'render-package-links', output: directory, mode: 'package', reports, warnings: [...new Set(warnings)], errors: [], root_issues: rootIssues, historical_issues: historicalIssues };
   } catch (error) { return { ok: false, action: 'render-package-links', output, reports: [], warnings: [], errors: [error.message] }; }
 }

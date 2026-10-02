@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-10-02T10:27:51.001Z",
+  "baseline_at": "2026-10-02T08:00:01.702Z",
+  "checked_files": 23589,
+  "ok": true,
+  "changed": [],
+  "missing": [],
+  "added": [],
+  "scope": "本轮开始时与结束时projects/archive/backups逐文件字节和集合核对；不证明文件内容或媒体质量"
+}

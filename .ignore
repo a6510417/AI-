@@ -5,6 +5,7 @@ archive/evidence/
 releases/
 sources/inbox/
 .cache/
+studio/maintenance/.audit-local/
 node_modules/
 projects/**/.ip-system/
 projects/**/deliveries/

@@ -105,6 +105,40 @@ export function scopeSelection(root, project, { episodes, chapters }) {
   } }
   return { roots, episodeIds, coreIds, requested: { type, asset_ids: ids }, warnings };
 }
+/** Shared by candidate checks and the formal export projection. Never moves editorial cut points. */
+export function playbackTimelineIssues(assets) {
+  const issues = [], numbers = new Map(), timelines = new Map(), versions = new Map();
+  const location = (asset, field, value) => ({ asset_id: asset.asset_id, version: asset.version, field, value });
+  const add = (rule, description, locations) => issues.push({ rule, description, locations, evidence: locations });
+  for (const asset of assets.filter(item => ['EP', 'SC', 'SHOT'].includes(item.type))) {
+    const d = asset.data ?? {};
+    if (versions.has(asset.asset_id) && versions.get(asset.asset_id).version !== asset.version) add('storyboard.mixed_versions', `${asset.asset_id}：当前镜头混用了该制作节点的多个版本；请对齐当前镜头的所属集/场次版本。历史依赖仍可保留。`, [location(versions.get(asset.asset_id), 'version', versions.get(asset.asset_id).version), location(asset, 'version', asset.version)]);
+    versions.set(asset.asset_id, asset);
+    const field = asset.type === 'EP' ? 'episode_number' : asset.type === 'SC' ? 'scene_number' : 'shot_number';
+    const numberKey = Number.isInteger(d[field]) && d[field] > 0 ? `${asset.type}:${asset.type === 'EP' ? '' : `${referenceKey(d.episode ?? {})}:`}${d[field]}` : null;
+    if (numberKey && numbers.has(numberKey)) add('storyboard.duplicate_number', `同一播放层级内编号重复：${numberKey}`, [location(numbers.get(numberKey), `data.${field}`, d[field]), location(asset, `data.${field}`, d[field])]);
+    if (numberKey) numbers.set(numberKey, asset);
+    if (asset.type === 'SHOT') {
+      if (!Number.isFinite(d.start_seconds) || d.start_seconds < 0 || !Number.isFinite(d.duration_seconds) || d.duration_seconds <= 0) {
+        add('storyboard.invalid_time', `${referenceKey(asset)}：镜头起点应为非负数，时长应大于零`, [location(asset, 'data.start_seconds', d.start_seconds), location(asset, 'data.duration_seconds', d.duration_seconds)]);
+        continue;
+      }
+      const epKey = referenceKey(d.episode ?? {});
+      if (!timelines.has(epKey)) timelines.set(epKey, []);
+      timelines.get(epKey).push(asset);
+    }
+  }
+  for (const [episode, shots] of timelines) {
+    shots.sort((a, b) => a.data.start_seconds - b.data.start_seconds || a.asset_id.localeCompare(b.asset_id));
+    let previous;
+    for (const shot of shots) {
+      if (previous && shot.data.start_seconds < previous.data.start_seconds + previous.data.duration_seconds - 1e-8) add('storyboard.timeline_overlap', `${episode}：镜头播放时间重叠 ${previous.asset_id} / ${shot.asset_id}`, [location(previous, 'data.duration_seconds', previous.data.duration_seconds), location(shot, 'data.start_seconds', shot.data.start_seconds)]);
+      if (!previous || shot.data.start_seconds + shot.data.duration_seconds > previous.data.start_seconds + previous.data.duration_seconds) previous = shot;
+    }
+  }
+  return issues;
+}
+
 export function playbackProjection(snapshots, selection = null) {
   // Historical shots referenced by prompts remain dependencies, not extra playback slots.
   const shots = snapshots.filter(item => item.asset.type === 'SHOT' && item.entry.adopted_version === item.asset.version && (!selection || selection.episodeIds.has(item.asset.data.episode.asset_id)));
@@ -123,26 +157,7 @@ export function playbackProjection(snapshots, selection = null) {
     if (item.asset.type === 'EP' && !episodes.some(other => other.asset.asset_id === item.asset.asset_id)) fail(`${referenceKey(item.asset)}：该剧集尚无完整的已采用场次和镜头链路`);
     if (item.asset.type === 'SC' && !scenes.some(other => other.asset.asset_id === item.asset.asset_id)) fail(`${referenceKey(item.asset)}：该场次尚无已采用 SHOT 镜头`);
   }
-  const numbers = new Set();
-  const timelines = new Map();
-  const nodeVersions = new Map();
-  for (const { asset } of [...episodes, ...scenes, ...shots]) {
-    if (nodeVersions.has(asset.asset_id) && nodeVersions.get(asset.asset_id) !== asset.version) fail(`${asset.asset_id}：当前镜头混用了该制作节点的多个版本；请对齐当前镜头的所属集/场次版本。历史依赖仍可保留。`);
-    nodeVersions.set(asset.asset_id, asset.version);
-    const d = asset.data;
-    const numberKey = asset.type === 'EP' ? `EP:${d.episode_number}` : asset.type === 'SC' ? `SC:${referenceKey(d.episode)}:${d.scene_number}` : `SHOT:${referenceKey(d.episode)}:${d.shot_number}`;
-    if (numberKey && numbers.has(numberKey)) fail(`同一播放层级内编号重复：${numberKey}`);
-    if (numberKey) numbers.add(numberKey);
-    if (asset.type === 'SHOT') {
-      const epKey = referenceKey(d.episode);
-      if (!timelines.has(epKey)) timelines.set(epKey, []);
-      timelines.get(epKey).push(asset);
-    }
-  }
-  for (const [episode, shots] of timelines) {
-    shots.sort((a, b) => a.data.start_seconds - b.data.start_seconds);
-    for (let index = 1; index < shots.length; index++) if (shots[index].data.start_seconds < shots[index - 1].data.start_seconds + shots[index - 1].data.duration_seconds - 1e-8) fail(`${episode}：镜头播放时间重叠 ${shots[index - 1].asset_id} / ${shots[index].asset_id}`);
-  }
+  ensureNoErrors(playbackTimelineIssues([...episodes, ...scenes, ...shots].map(item => item.asset)).map(issue => issue.description));
   const covered = new Set([...chapters, ...episodes, ...scenes, ...shots].map(item => referenceKey(item.asset)));
   const uncovered = snapshots.filter(item => ['CH', 'EP', 'SC'].includes(item.asset.type) && (!selection || selection.coreIds.has(item.asset.asset_id)) && item.entry.adopted_version === item.asset.version && !covered.has(referenceKey(item.asset))).map(item => ({ asset_id: item.asset.asset_id, version: item.asset.version, type: item.asset.type, reason: '当前采用新版未进入本次镜头链；本次交接保留相同资产的历史已完成版本' }));
   return { ...playback, uncovered };

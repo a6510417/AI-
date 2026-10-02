@@ -1,0 +1,90 @@
+{
+  "sample": {
+    "asset": {
+      "asset_id": "IP003-CH-001",
+      "version": "1.0.0"
+    },
+    "body_sha256": "9c87be8b5590120d578a117836d87c4a0f358556b9ceec6c8675355b1836d834",
+    "source_line": 12,
+    "required_range": [
+      8,
+      18
+    ]
+  },
+  "summary_only": {
+    "ok": false,
+    "budget": {
+      "unit": "JSON UTF-16 code units",
+      "max_chars": 24000,
+      "used_chars": 6401,
+      "required_chars": 6401,
+      "complete": false
+    },
+    "reading_requirements": {
+      "complete": false,
+      "items": [
+        {
+          "index": 0,
+          "required": {
+            "kind": "asset",
+            "asset": {
+              "asset_id": "IP003-CH-001",
+              "version": "1.0.0"
+            },
+            "file": "正文.md",
+            "sha256": "9c87be8b5590120d578a117836d87c4a0f358556b9ceec6c8675355b1836d834",
+            "start_line": 8,
+            "end_line": 18
+          },
+          "included_ranges": [],
+          "complete": false,
+          "evidence_scope": "仅检查匹配完整文件哈希的所需文本是否装入；不证明真实原著、AI已理解或语义审核通过。"
+        }
+      ]
+    },
+    "errors": [
+      "creative_brief.required_readings[0] 所需原文／附件未完整装入匹配哈希的文本；摘要、引用身份和附件目录不能替代所需正文。"
+    ]
+  },
+  "source_included": {
+    "ok": true,
+    "budget": {
+      "unit": "JSON UTF-16 code units",
+      "max_chars": 24000,
+      "used_chars": 7248,
+      "required_chars": 7248,
+      "complete": true
+    },
+    "reading_requirements": {
+      "complete": true,
+      "items": [
+        {
+          "index": 0,
+          "required": {
+            "kind": "asset",
+            "asset": {
+              "asset_id": "IP003-CH-001",
+              "version": "1.0.0"
+            },
+            "file": "正文.md",
+            "sha256": "9c87be8b5590120d578a117836d87c4a0f358556b9ceec6c8675355b1836d834",
+            "start_line": 8,
+            "end_line": 18
+          },
+          "included_ranges": [
+            {
+              "start_line": 8,
+              "end_line": 18
+            }
+          ],
+          "complete": true,
+          "evidence_scope": "仅检查匹配完整文件哈希的所需文本是否装入；不证明真实原著、AI已理解或语义审核通过。"
+        }
+      ]
+    },
+    "errors": [],
+    "source_present": true
+  },
+  "fingerprints_differ": true,
+  "evidence_scope": "实际只读冻结第一章，未改项目，未生成媒体；内容识别与8秒文字方案见审查报告"
+}

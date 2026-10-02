@@ -370,7 +370,29 @@ test('两个进程同时恢复旧锁时只有一个可解除，重试后两份�
   assert.equal(json(path.join(project, 'project.json')).assets.length, 2);
 });
 
-test('中文菜单可退出', () => {
-  const menu = spawnSync(process.execPath, [cli], { input: '0\n', encoding: 'utf8' });
-  assert.equal(menu.status, 0, menu.stderr); assert.match(menu.stdout, /原创 IP 生产工具/);
+test('无参入口立即显示中文用法，stdin保持开启也不等待人工输入', async t => {
+  const child = spawn(process.execPath, [cli], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '', errors = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { errors += chunk; });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const code = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { child.kill(); reject(new Error('无参入口仍在等待输入')); }, 5000);
+    child.once('error', error => { clearTimeout(timeout); reject(error); });
+    child.once('close', code => { clearTimeout(timeout); resolve(code); });
+  });
+  assert.equal(code, 0, errors);
+  assert.match(output, /AI 漫剧工作室命令接口/); assert.match(output, /studio\/bin\/studio\.mjs/);
+  assert.doesNotMatch(output, /选择：|中文菜单|工作室\.mjs/);
+});
+
+test('JSON入口缺少命令或参数时立即返回统一错误对象', () => {
+  for (const args of [['--json'], ['--json', '--project', '未使用目录'], ['status', '--json'], ['status', '--project', '--json']]) {
+    const result = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stderr, '');
+    const response = JSON.parse(result.stdout);
+    assert.equal(response.ok, false); assert.ok(response.errors.length > 0);
+    assert.match(response.errors[0], /缺少命令|必须指定 --project|参数 --project 缺少值/);
+  }
 });

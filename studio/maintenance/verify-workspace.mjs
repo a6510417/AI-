@@ -15,7 +15,7 @@ function walk(directory) {
   }
 }
 for (const directory of ['studio/docs', 'studio/使用说明', 'studio/技能库', 'studio/模板库', 'studio/知识库', '.agents/skills']) walk(path.join(root, directory));
-for (const filename of ['README.md', 'AGENTS.md', 'studio/项目总览.md', 'archive/README.md', 'releases/README.md']) if (fs.existsSync(path.join(root, filename))) files.push(path.join(root, filename));
+for (const filename of ['README.md', '工作室入口.md', 'AGENTS.md', 'studio/项目总览.md', 'archive/README.md']) if (fs.existsSync(path.join(root, filename))) files.push(path.join(root, filename));
 for (const entry of fs.readdirSync(path.join(root, 'archive'), { withFileTypes: true })) if (entry.isFile() && entry.name.endsWith('.md') && entry.name !== 'README.md') files.push(path.join(root, 'archive', entry.name));
 let links = 0;
 for (const filename of files) {

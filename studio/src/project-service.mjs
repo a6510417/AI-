@@ -12,8 +12,8 @@ import { reviewRecord, reviewForSnapshot } from './reviews.mjs';
 import { copySnapshot, handoffMarkdown, dataMarkdown } from './output.mjs';
 import { renderPackageLinks } from './links.mjs';
 export { DIRECTORIES, CHAPTER_FILES, TYPES, safePath };
-function renderStagedViews(root, project, staged, indexName, warnings) {
-  if (project.schema_version !== 2) return;
+function renderStagedViews(root, project, staged, indexName, warnings, enabled = project.schema_version === 2) {
+  if (!enabled) return;
   const transactionToken = readJSON(safePath(root, `${SYSTEM}/write.lock`)).token;
   const result = renderPackageLinks({ project: root, output: staged, transactionToken });
   ensureNoErrors(result.errors ?? []);
@@ -66,7 +66,7 @@ function validateProjectInternal({ project: root, strict = false }, migrationTok
     try { if (!fs.statSync(safePath(root, directory)).isDirectory()) errors.push(`${directory} 应为目录`); }
     catch (error) { errors.push(`项目目录缺失或无效 ${directory}：${error.message}`); }
   }
-  try { if (pendingStatus(root)) warnings.push('存在待恢复事务；下次写操作会校验并恢复。当前检查不能视为已提交验收。'); } catch (error) { errors.push(error.message); }
+  try { if (pendingStatus(root)) warnings.push('存在待恢复事务；先运行 recover --project <项目目录>，再核对原业务结果。当前检查不能视为已提交验收。'); } catch (error) { errors.push(error.message); }
   const cache = new Map();
   if (!errors.length) {
     for (const entry of project.assets) {
@@ -108,6 +108,85 @@ export function validateMigratingProject({ project, strict = false, migrationTok
   return validateProjectInternal({ project, strict }, migrationToken);
 }
 
+export function recoverProject({ project: root }) {
+  const result = withLock(root, resolved => ({ ok: true, action: 'recover', project: resolved, recovered_transaction: null, recovered_lock: null }), { allowInterruptedClaims: true });
+  result.message = result.recovered_transaction || result.recovered_lock ? '已恢复既有中断事务或旧锁；请读取状态并核对原业务结果。仅完成已有提交，不追加新的业务操作。' : '没有待恢复事务或旧锁；未执行业务写入。';
+  return result;
+}
+
+// Ordinary saves and production imports share this immutable snapshot contract.
+// Callers hold the synchronous project lock and commit the returned move.
+export function stageAssetSnapshot(root, project, entry, directory, { reason, transaction, name = 'snapshot' }) {
+  if (fs.existsSync(path.join(directory, '_snapshot.json'))) fail('工作资产中不能有保留文件 _snapshot.json');
+  const inspected = inspectAsset(root, project, entry, directory);
+  ensureNoErrors(inspected.errors);
+  const asset = inspected.asset;
+  if (entry.versions.some(saved => saved.version === asset.version)) fail(`${entry.asset_id}@${asset.version} 已保存，历史版本不可覆盖；请递增工作稿 version`);
+  for (const item of project.assets) for (const saved of item.versions) readSnapshot(root, project, item.asset_id, saved.version);
+  const target = `${SYSTEM}/snapshots/${entry.asset_id}/${asset.version}`;
+  if (fs.existsSync(safePath(root, target))) fail('历史快照目录已存在但未登记；请先核对恢复记录，拒绝覆盖');
+  transaction ??= transactionBase(root);
+  const stagedRelative = `${transaction.relative}/${name}`;
+  const staged = safePath(root, stagedRelative);
+  fs.mkdirSync(staged);
+  const before = fingerprint(root, directory);
+  for (const filename of Object.keys(before)) {
+    const destination = safePath(root, `${stagedRelative}/${filename}`);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    writeSynced(destination, fs.readFileSync(path.join(directory, filename)));
+  }
+  compareFiles(fingerprint(root, staged), before, '保存中的快照');
+  compareFiles(fingerprint(root, directory), before, '保存期间工作稿');
+  const timestamp = now();
+  const modified = Math.max(...Object.keys(before).map(filename => fs.statSync(path.join(directory, filename)).mtimeMs));
+  const manifest = { schema_version: 1, project_id: project.project_id, asset_id: asset.asset_id, version: asset.version, created_at: timestamp, modified_at: new Date(modified).toISOString(), source_path: entry.path, previous_version: entry.versions.at(-1)?.version ?? null, reason, files: before };
+  writeSynced(path.join(staged, '_snapshot.json'), jsonText(manifest));
+  entry.versions.push({ version: asset.version, path: target, created_at: timestamp, modified_at: manifest.modified_at, manifest_sha256: hash(jsonText(manifest)) });
+  operation(project, 'save-version', { asset_id: asset.asset_id, version: asset.version, reason, files: Object.keys(before), manifest_sha256: hash(jsonText(manifest)) });
+  return { asset, warnings: inspected.warnings, files: before, move: { kind: 'snapshot', staged: stagedRelative, target, files: fingerprint(root, staged) } };
+}
+
+function reservedAssetIds(project) {
+  return new Set([
+    ...project.assets.map(entry => entry.asset_id),
+    ...(project.operations ?? []).filter(event => event.action === 'cleanup-deleted-assets').flatMap(event => (event.removed_assets ?? []).map(entry => entry.asset_id)),
+  ].filter(id => typeof id === 'string' && /^IP\d+-[A-Z]+-\d{3,}$/.test(id)));
+}
+
+export function cleanupDeletedAssets({ project: root, assets, reason }) {
+  if (!filled(reason)) fail('清理已删候选必须提供具体 --reason');
+  const ids = String(assets ?? '').split(',').map(id => id.trim());
+  if (!ids.length || ids.some(id => !/^IP\d+-[A-Z]+-\d{3,}$/.test(id)) || new Set(ids).size !== ids.length) fail('必须用 --assets 指定不重复的已删除候选ID');
+  return withLock(root, resolved => {
+    const project = readProject(resolved); ensureNoErrors(registryErrors(resolved, project));
+    if (project.schema_version !== 2) fail('清理已删候选仅支持布局v2');
+    const entries = ids.map(id => findEntry(project, id)), selected = new Set(ids), cache = new Map();
+    for (const entry of entries) {
+      if (entry.lifecycle !== 'retired' || entry.adopted_version || (project.adoption_history ?? []).some(event => event.asset_id === entry.asset_id)) fail(`${entry.asset_id}：仅能清理从未采用的退役候选`);
+      if (fs.existsSync(workingPath(resolved, entry.path, project, entry))) fail(`${entry.asset_id}：工作目录仍存在，清理不负责删除文件`);
+    }
+    // Keep every historical snapshot intact; refuse to detach an ID still referenced
+    // by any other working asset or frozen version, including unadopted drafts.
+    for (const entry of project.assets) {
+      const inspections = [];
+      if (!selected.has(entry.asset_id)) inspections.push(inspectAsset(resolved, project, entry, workingPath(resolved, entry.path, project, entry), { cache }));
+      for (const saved of entry.versions) {
+        const snapshot = readSnapshot(resolved, project, entry.asset_id, saved.version, cache);
+        if (!selected.has(entry.asset_id)) inspections.push(inspectAsset(resolved, project, entry, snapshot.directory, { legacy: true, cache }));
+      }
+      for (const inspection of inspections) {
+        ensureNoErrors(inspection.errors);
+        const ref = inspection.refs.find(ref => selected.has(ref.asset_id));
+        if (ref) fail(`${entry.asset_id}：仍引用${ref.asset_id}@${ref.version}，不能清理登记`);
+      }
+    }
+    project.assets = project.assets.filter(entry => !selected.has(entry.asset_id));
+    operation(project, 'cleanup-deleted-assets', { reason, removed_assets: entries });
+    commit(resolved, project, { action: 'cleanup-deleted-assets' });
+    return { ok: true, action: 'cleanup-deleted-assets', removed: ids, message: '已移除已删除候选的现行登记；原登记、编号与历史快照保留，未删除文件或改变采用指针。' };
+  });
+}
+
 export function saveVersion({ project: root, asset: assetId, path: assetPath, reason = '保存本轮工作稿快照' }) {
   if (Boolean(assetId) === Boolean(assetPath)) fail('save-version 必须且只能提供 --asset 或 --path');
   if (!filled(reason)) fail('save-version 的 --reason 不能是空白');
@@ -122,6 +201,7 @@ export function saveVersion({ project: root, asset: assetId, path: assetPath, re
       entry = project.assets.find(item => item.asset_id === metadata.asset_id);
       if (entry && entry.path.replaceAll('\\', '/') !== normalized) fail('该 ID 已登记到另一个工作目录，拒绝替换');
       if (!entry) {
+        if (reservedAssetIds(project).has(metadata.asset_id)) fail('该资产ID已用于历史记录，不能重新登记；请使用新的编号');
         entry = { asset_id: metadata.asset_id, type: metadata.type, path: normalized, aliases: [], versions: [], adopted_version: null };
         project.assets.push(entry);
       }
@@ -129,45 +209,20 @@ export function saveVersion({ project: root, asset: assetId, path: assetPath, re
     if (project.schema_version === 2 && entry.lifecycle === 'retired') fail('退役候选不能保存新版本；请先 restore-asset 恢复');
     ensureNoErrors(registryErrors(resolved, project));
     const directory = workingPath(resolved, entry.path, project, entry);
-    if (fs.existsSync(path.join(directory, '_snapshot.json'))) fail('工作资产中不能有保留文件 _snapshot.json');
-    const inspected = inspectAsset(resolved, project, entry, directory);
-    ensureNoErrors(inspected.errors);
-    const asset = inspected.asset;
-    if (entry.versions.some(saved => saved.version === asset.version)) fail(`${entry.asset_id}@${asset.version} 已保存，历史版本不可覆盖；请递增工作稿 version`);
-    // Any existing adopted or historical snapshot must remain intact before adding another version.
-    for (const item of project.assets) for (const saved of item.versions) readSnapshot(resolved, project, item.asset_id, saved.version);
-    const target = `${SYSTEM}/snapshots/${entry.asset_id}/${asset.version}`;
-    if (fs.existsSync(safePath(resolved, target))) fail('历史快照目录已存在但未登记；请先核对恢复记录，拒绝覆盖');
-    const transaction = transactionBase(resolved);
-    const stagedRelative = `${transaction.relative}/snapshot`;
-    const staged = safePath(resolved, stagedRelative);
-    fs.mkdirSync(staged);
-    const before = fingerprint(resolved, directory);
-    for (const filename of Object.keys(before)) {
-      const destination = safePath(resolved, `${stagedRelative}/${filename}`);
-      fs.mkdirSync(path.dirname(destination), { recursive: true });
-      writeSynced(destination, fs.readFileSync(path.join(directory, filename)));
-    }
-    compareFiles(fingerprint(resolved, staged), before, '保存中的快照');
-    compareFiles(fingerprint(resolved, directory), before, '保存期间工作稿');
-    const timestamp = now();
-    const modified = Math.max(...Object.keys(before).map(filename => fs.statSync(path.join(directory, filename)).mtimeMs));
-    const manifest = { schema_version: 1, project_id: project.project_id, asset_id: asset.asset_id, version: asset.version, created_at: timestamp, modified_at: new Date(modified).toISOString(), source_path: entry.path, previous_version: entry.versions.at(-1)?.version ?? null, reason, files: before };
-    writeSynced(path.join(staged, '_snapshot.json'), jsonText(manifest));
-    entry.versions.push({ version: asset.version, path: target, created_at: timestamp, modified_at: manifest.modified_at, manifest_sha256: hash(jsonText(manifest)) });
-    operation(project, 'save-version', { asset_id: asset.asset_id, version: asset.version, reason, files: Object.keys(before), manifest_sha256: hash(jsonText(manifest)) });
-    commit(resolved, project, { action: 'save-version', moves: [{ kind: 'snapshot', staged: stagedRelative, target, files: fingerprint(resolved, staged) }] });
-    return { ok: true, action: 'save-version', asset_id: asset.asset_id, version: asset.version, warnings: inspected.warnings, message: '已保存不可覆盖的历史快照；采用指针未自动改变。' };
+    const saved = stageAssetSnapshot(resolved, project, entry, directory, { reason });
+    commit(resolved, project, { action: 'save-version', moves: [saved.move] });
+    return { ok: true, action: 'save-version', asset_id: saved.asset.asset_id, version: saved.asset.version, warnings: saved.warnings, message: '已保存不可覆盖的历史快照；采用指针未自动改变。' };
   });
 }
 export function newAsset({ project: root, type, title = '', sequence }) {
   return withLock(root, resolved => {
     const project = readProject(resolved); ensureNoErrors(registryErrors(resolved, project));
     if (!TYPES.includes(type)) fail(`不支持的资产类型：${type}`);
-    const highest = Math.max(0, ...project.assets.filter(entry => entry.type === type).map(entry => Number(entry.asset_id.split('-')[2])));
+    const usedIds = reservedAssetIds(project);
+    const highest = Math.max(0, ...[...usedIds].filter(id => id.split('-')[1] === type).map(id => Number(id.split('-')[2])));
     const number = sequence ?? String(highest + 1).padStart(3, '0');
     const skeleton = createAssetSkeleton({ projectId: project.project_id, type, sequence: number, title });
-    if (project.assets.some(entry => entry.asset_id === skeleton.asset.asset_id)) fail(`资产已存在，拒绝覆盖：${skeleton.asset.asset_id}`);
+    if (usedIds.has(skeleton.asset.asset_id)) fail(`资产已存在或编号已使用，拒绝覆盖：${skeleton.asset.asset_id}`);
     const target = assetDirectory(project, type, skeleton.asset.asset_id);
     if (fs.existsSync(workingPath(resolved, target, project, { type, asset_id: skeleton.asset.asset_id }))) fail(`工作目录已存在，拒绝覆盖：${target}`);
     const transaction = transactionBase(resolved), stagedRelative = `${transaction.relative}/asset`;
@@ -252,7 +307,7 @@ export function projectStatus({ project: root }) {
   const reviewItems = staleReviews(root, project);
   for (const item of reviewItems) pending.push({ asset_id: item.asset_id, action: '复核上游变化，修订或记录保留历史', review_item_id: item.review_item_id, reason: item.reason });
   if (!project.assets.length) pending.push({ action: '先创建 WORLD、CHAR、PLOT 或 CH 工作资产', reason: '项目尚无资产' });
-  if (pendingStatus(root)) pending.push({ action: '核对中断事务后执行一次写操作恢复', reason: '存在未完成的提交日志' });
+  if (pendingStatus(root)) pending.push({ action: '运行 recover 恢复中断事务，再核对原业务结果', reason: '存在未完成的提交日志' });
   return { ok: errors.length === 0, action: 'status', project: root, project_id: project.project_id, name: project.name, assets, adopted: assets.filter(item => item.adopted_version), drafts: assets.filter(item => !item.retired && (item.unsaved_changes || !item.adopted_version)), ...(project.schema_version === 2 ? { retired: assets.filter(item => item.retired) } : {}), pending, production_notes: productionNotes, review_items: reviewItems, resolved_reviews: (project.review_dispositions ?? []).length, errors, message: '只读状态已读取；pending 仅为机器可识别的结构待办，空列表不代表创作或媒体制作完成，请同时阅读制作报告。' };
 }
 
@@ -332,8 +387,9 @@ export function exportProject({ project: root, out, episodes, chapters, requireR
   });
 }
 
-export function resumeProject({ project: root, out }) {
+export function resumeProject({ project: root, out, readingViews = false }) {
   if (!filled(out)) fail('resume 需要 --out 指定新的项目内续作包目录');
+  if (typeof readingViews !== 'boolean') fail('resume 的 readingViews 必须为布尔值');
   const normalized = out.replaceAll('\\', '/');
   return withLock(root, resolved => {
     const project = readProject(resolved); ensureNoErrors(registryErrors(resolved, project));
@@ -358,17 +414,17 @@ export function resumeProject({ project: root, out }) {
       reading.push({ asset_id: asset.asset_id, version: asset.version, type: asset.type, title: asset.title, path: `${relative}/asset.json`, ...(asset.type === 'CH' ? { chapter_files: CHAPTER_FILES.map(filename => `${relative}/${filename}`) } : {}) });
     }
     const reviews = (project.content_reviews ?? []).filter(index => used.some(asset => asset.asset_id === index.asset_id && asset.version === index.version)).map(index => reviewRecord(resolved, project, index.review_id));
-    const info = { schema_version: 1, project_id: project.project_id, project_name: project.name, created_at: now(), scope: '采用基准与续作待办；未采用工作稿只列状态，不混入正文基准；pending 为空不代表创作或媒体完成', assets: used, states: used.filter(asset => asset.type === 'STATE'), pending: status.pending, production_notes: status.production_notes, working_errors: status.errors, warnings, review_items: status.review_items, review_dispositions: project.review_dispositions ?? [], reading_list: reading, content_reviews: reviews };
+    const info = { schema_version: 1, project_id: project.project_id, project_name: project.name, created_at: now(), reading_views: readingViews, scope: '采用基准与续作待办；未采用工作稿只列状态，不混入正文基准；pending 为空不代表创作或媒体完成', assets: used, states: used.filter(asset => asset.type === 'STATE'), pending: status.pending, production_notes: status.production_notes, working_errors: status.errors, warnings, review_items: status.review_items, review_dispositions: project.review_dispositions ?? [], reading_list: reading, content_reviews: reviews };
     writeSynced(path.join(staged, '续作信息.json'), jsonText(info));
     const lines = [`# ${project.name}｜续作包`, '', '先阅读下列精确采用版本，再处理待办。文件打包成功不代表文学质量或媒体验收通过。未采用工作稿没有混入基准；只做小说时无需完成分集和分镜。', '', '## 读取清单', '', ...reading.flatMap(item => [`- [${referenceKey(item)} ${item.title}](${item.path})`, ...(item.chapter_files ?? []).map(filename => `  - [${path.basename(filename)}](${filename})`)]), '', '## 状态与待办', '', ...status.pending.map(item => `- ${item.asset_id ?? project.project_id}：${item.action}；${item.reason}`), ...status.errors.map(error => `- 工作稿问题：${error}`), '', '## 新对话启动请求', '', '请先读取本包续作信息.json和读取清单中的采用版本。按原项目的IP总控、小说生产与内容审核技能继续处理待办；区分实际来源和建议，不擅自更新采用基准，不把未查看素材说成已验收。', ''];
     if (warnings.length) lines.push('', '## 校验提示', '', ...warnings.map(warning => `- ${warning}`));
-    lines.push('', '## 制作报告中的后续工作', '', '机器结构待办为空，不代表创作、参考素材或实际媒体已经完成。以下内容原样摘自采用报告，工具没有自动执行或关闭这些工作。', '', ...status.production_notes.flatMap(({ asset_id, version, ...notes }) => dataMarkdown(notes).map(line => `- ${asset_id}@${version}：${line}`)), '');
+    lines.push('', '## 制作报告中的后续工作', '', '机器结构待办只反映可识别的结构状态，不能证明创作、参考素材或实际媒体已经完成。以下内容原样摘自采用报告，工具没有自动执行或关闭这些工作。', '', ...status.production_notes.flatMap(({ asset_id, version, ...notes }) => dataMarkdown(notes).map(line => `- ${asset_id}@${version}：${line}`)), '');
     writeSynced(path.join(staged, '续作说明.md'), lines.join('\n'));
-    renderStagedViews(resolved, project, staged, '续作信息.json', warnings);
-    const record = { path: normalized, created_at: info.created_at, assets: used.map(({ asset_id, version, manifest_sha256 }) => ({ asset_id, version, manifest_sha256 })) };
+    renderStagedViews(resolved, project, staged, '续作信息.json', warnings, readingViews);
+    const record = { path: normalized, created_at: info.created_at, reading_views: readingViews, assets: used.map(({ asset_id, version, manifest_sha256 }) => ({ asset_id, version, manifest_sha256 })) };
     (project.resumes ??= []).push(record); operation(project, 'resume', record);
     commit(resolved, project, { action: 'resume', moves: [{ kind: 'resume', staged: stagedRelative, target: normalized, files: fingerprint(resolved, staged) }] });
-    return { ok: true, action: 'resume', output: target, assets: used.length, pending: status.pending, warnings, message: '已生成采用基准、连续性状态、待办和读取清单；不要求先完成漫改。' };
+    return { ok: true, action: 'resume', output: target, assets: used.length, reading_views: readingViews, pending: status.pending, warnings, message: '已生成采用基准、连续性状态、待办和读取清单；不要求先完成漫改。' };
   });
 }
 

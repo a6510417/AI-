@@ -170,11 +170,13 @@ test('v2交付在事务提交前加入报告视图并保留未解析警告及冻
   fs.writeFileSync(path.join(work(project, report), '制作报告.md'), body);
   saveAdopt(project, report);
   const frozen = path.join(project, `.ip-system/snapshots/${report}/1.0.0/制作报告.md`), before = fs.readFileSync(frozen);
-  const result = resumeProject({ project, out: 'deliveries/resume/报告视图回归' });
+  const result = resumeProject({ project, out: 'deliveries/resume/报告视图回归', readingViews: true });
   assert.ok(result.warnings.some(warning => warning.includes('missing.md')));
   assert.ok(json(path.join(result.output, '续作信息.json')).warnings.some(warning => warning.includes('missing.md')));
   const views = json(path.join(result.output, 'views/阅读视图.json'));
   assert.equal(views.reports.length, 1);
+  assert.equal(views.mode, 'package');
+  assert.equal(fs.existsSync(path.join(result.output, `views/${report}/1.0.0/assets`)), false);
   assert.deepEqual(fs.readFileSync(frozen), before);
   assert.deepEqual(fs.readFileSync(path.join(result.output, `assets/${report}/1.0.0/制作报告.md`)), before);
 });

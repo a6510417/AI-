@@ -3,6 +3,8 @@ import path from 'node:path';
 import { SYSTEM, CHAPTER_FILES, SOURCE_KINDS, ADOPTION_STATUSES, SHOT_TEXT_FIELDS, ASSET_ID as ID, VERSION, object, filled, meaningful, concrete, nonemptyString, fail, referenceKey, eventKey, referenceBindingErrors, mediaFileErrors } from './rules.mjs';
 import { relativeFiles, readJSON, readText, safePath } from './storage.mjs';
 import { readSnapshot } from './registry.mjs';
+import { continuityShapeErrors } from './连续性状态.mjs';
+import { visualContractErrors } from './创作执行约束.mjs';
 export function collectRefs(value, location, refs, errors, { skipIdentity = false } = {}) {
   if (Array.isArray(value)) return value.forEach((item, index) => collectRefs(item, `${location}[${index}]`, refs, errors));
   if (!object(value)) return;
@@ -20,7 +22,7 @@ export function collectRefs(value, location, refs, errors, { skipIdentity = fals
     collectRefs(item, `${location}.${key}`, refs, errors);
   }
 }
-export function inspectAsset(root, project, entry, directory, { strict = false, legacy = false, cache = new Map() } = {}) {
+export function inspectAsset(root, project, entry, directory, { strict = false, legacy = false, cache = new Map(), candidate } = {}) {
   const errors = [], warnings = [], refs = [];
   let asset;
   const label = `${entry.asset_id}/${path.relative(root, directory).replaceAll('\\', '/')}`;
@@ -30,8 +32,8 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
   const requireShape = (condition, message) => { if (!condition) ((!legacy && (strict || !historical)) ? errors : warnings).push(`${label}：${message}`); };
   try {
     // Enumerating rejects links even in files not otherwise used by this version.
-    relativeFiles(root, directory);
-    asset = readJSON(path.join(directory, 'asset.json'));
+    if (!candidate) relativeFiles(root, directory);
+    asset = candidate ? candidate.asset : readJSON(path.join(directory, 'asset.json'));
     if (!object(asset) || asset.schema_version !== 1 || asset.project_id !== project.project_id || asset.asset_id !== entry.asset_id || asset.type !== entry.type) fail(`${label}/asset.json：身份字段与项目登记不一致`);
     if (!VERSION.test(asset.version)) fail(`${label}/asset.json：version 必须为三段数字`);
     if (!SOURCE_KINDS.includes(asset.source_kind)) fail(`${label}/asset.json：来源性质不在协议枚举中`);
@@ -44,6 +46,8 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
     collectRefs(asset.refs, `${label}/refs`, refs, errors);
     collectRefs(asset.data, `${label}/data`, refs, errors);
     const data = asset.data;
+    for (const message of continuityShapeErrors(asset)) requireShape(false, message);
+    for (const message of visualContractErrors(asset)) requireShape(false, message);
     const requireRef = (ref, type, field, event = false) => {
       must(object(ref) && ref.asset_id?.split('-')[1] === type && VERSION.test(ref.version ?? ''), `${field} 需要 ${type} 版本引用`);
       if (event) must(filled(ref?.event_id), `${field} 需要 event_id`);
@@ -55,9 +59,9 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
     if (entry.type === 'CH') {
       for (const filename of CHAPTER_FILES) {
         const file = path.join(directory, filename);
-        if (!fs.existsSync(file)) { errors.push(`${label}/${filename}：章节七文件缺失`); continue; }
-        if (filename.endsWith('.md')) { must(filled(readText(file)), '正文.md 待补全'); continue; }
-        const content = readJSON(file);
+        if (candidate ? !Object.hasOwn(candidate.files, filename) : !fs.existsSync(file)) { errors.push(`${label}/${filename}：章节七文件缺失`); continue; }
+        if (filename.endsWith('.md')) { must(filled(candidate ? candidate.files[filename] : readText(file)), '正文.md 待补全'); continue; }
+        const content = candidate ? JSON.parse(candidate.files[filename]) : readJSON(file);
         if (!object(content) && !Array.isArray(content)) { errors.push(`${label}/${filename}：需要 JSON 对象或数组`); continue; }
         if (object(content)) {
           for (const key of ['asset_id', 'project_id', 'version']) {
@@ -95,6 +99,13 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
       must(Number.isFinite(data.start_seconds) && data.start_seconds >= 0, 'start_seconds 应为非负数');
       must(Number.isFinite(data.duration_seconds) && data.duration_seconds > 0, 'duration_seconds 应为正数');
       for (const field of SHOT_TEXT_FIELDS) must(concrete(data[field]), `${field} 文字待补全，不能使用 undefined、null、同上或待填`);
+      for (const [index, selection] of (Array.isArray(data.asset_visuals) ? data.asset_visuals : []).entries()) {
+        if (!object(selection) || !object(selection.asset) || !ID.test(selection.asset.asset_id ?? '') || !VERSION.test(selection.asset.version ?? '')) continue;
+        try {
+          const fixed = readSnapshot(root, project, selection.asset.asset_id, selection.asset.version, cache).asset.data?.visual_base;
+          if (fixed?.locked === true && concrete(selection.description) && selection.description.trim() !== fixed.description?.trim()) requireShape(false, `data.asset_visuals[${index}].description 不能重新定义 locked 固定视觉；动态状态使用 state_description 并实际审核`);
+        } catch { /* ordinary exact-reference diagnostics below preserve the underlying error */ }
+      }
     }
     if (entry.type === 'PROMPT' && meaningful(data)) {
       requireShape(object(data.shot) && data.shot.asset_id?.split('-')[1] === 'SHOT' && VERSION.test(data.shot.version ?? ''), 'shot 需要 SHOT 版本引用');
@@ -104,11 +115,15 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
       requireShape([data.image_prompt, data.video_prompt, data.prompt].some(concrete), '提示词需要至少一条可复制的 image_prompt、video_prompt 或 prompt 正文');
       requireShape(concrete(data.negative_prompt), 'negative_prompt 需要本镜排除项；没有额外排除时写“无额外项”');
     }
-    if (entry.type === 'PROMPT' && Object.hasOwn(data, 'reference_bindings')) {
-      for (const message of referenceBindingErrors(data.reference_bindings)) requireShape(false, message);
-      for (const [index, binding] of (Array.isArray(data.reference_bindings) ? data.reference_bindings : []).entries()) {
+    const bindingGroups = [
+      ...(entry.type === 'PROMPT' && Object.hasOwn(data, 'reference_bindings') ? [{ bindings: data.reference_bindings, field: 'data.reference_bindings' }] : []),
+      ...(object(data.visual_base) && Object.hasOwn(data.visual_base, 'reference_bindings') ? [{ bindings: data.visual_base.reference_bindings, field: 'data.visual_base.reference_bindings' }] : []),
+    ];
+    for (const group of bindingGroups) {
+      for (const message of referenceBindingErrors(group.bindings)) requireShape(false, message.replaceAll('PROMPT.data.reference_bindings', group.field));
+      for (const [index, binding] of (Array.isArray(group.bindings) ? group.bindings : []).entries()) {
         if (referenceBindingErrors([binding]).length) continue;
-        const field = `data.reference_bindings[${index}]`;
+        const field = `${group.field}[${index}]`;
         let media;
         try { media = readSnapshot(root, project, binding.media.asset_id, binding.media.version, cache); }
         catch (error) { errors.push(`${label}/${field}.media：${error.message}`); continue; }
@@ -137,10 +152,11 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
       }
     }
     if (entry.type === 'STATE') {
-      must(Array.isArray(data.changes) && data.changes.length > 0, 'changes 需要状态变化记录');
+      const structuredState = Object.hasOwn(data, 'change_order');
+      must(Array.isArray(data.changes) && (data.changes.length > 0 || structuredState && (data.initial_states?.length > 0 || object(data.base_state))), 'changes 需要状态变化记录；结构化状态可声明明确初值或基准');
       for (const [index, change] of (Array.isArray(data.changes) ? data.changes : []).entries()) {
         requireRef(change?.event_ref, 'CH', `changes[${index}].event_ref`, true);
-        for (const field of ['before', 'after', 'effective_node', 'story_time']) must(meaningful(change?.[field]), `changes[${index}].${field} 待补全`);
+        for (const field of ['before', 'after', 'effective_node', 'story_time']) if (!(structuredState && Object.hasOwn(change ?? {}, 'change_id') && ['before', 'after'].includes(field))) must(meaningful(change?.[field]), `changes[${index}].${field} 待补全`);
       }
       for (const field of ['knowledge', 'possessions', 'foreshadowing']) {
         if (data[field] === undefined && !meaningful(data)) continue;
@@ -199,4 +215,27 @@ export function inspectAsset(root, project, entry, directory, { strict = false, 
   } catch (error) { errors.push(error.message); }
   const uniqueRefs = [...new Map(refs.map(item => [`${referenceKey(item.ref)}#${item.ref.event_id ?? ''}`, item.ref])).values()];
   return { asset, errors, warnings, refs: uniqueRefs };
+}
+
+/** The same schema checks, with an in-memory draft instead of a temporary working directory. */
+export function inspectCandidateAsset(root, project, asset, files = {}, { cache = new Map(), strict = true } = {}) {
+  const errors = [], warnings = [], refs = [];
+  try {
+    if (!object(asset) || !ID.test(asset.asset_id ?? '') || asset.asset_id.split('-')[1] !== asset.type || !object(files)) fail('候选检查需要完整资产、匹配类型和附件文字对象');
+    if (asset.type === 'MEDIA') fail('媒体检查需要已登记的真实文件，不接受文字候选冒充媒体');
+    const directory = safePath(root, `production-candidates/${asset.asset_id}`);
+    const seen = new Set();
+    for (const [name, text] of Object.entries(files)) {
+      safePath(directory, name);
+      const key = name.replaceAll('\\', '/').toLowerCase();
+      if (typeof text !== 'string' || text.includes('\0')) fail(`候选附件 ${name} 应为 UTF-8 文字`);
+      if (!['.md', '.txt', '.json', '.csv', '.tsv', '.srt', '.vtt', '.yaml', '.yml'].includes(path.posix.extname(key))) fail(`候选附件 ${name} 不是支持的文本类型；真实媒体沿用现有登记入口`);
+      if (key.split('/').some(part => ['asset.json', '_snapshot.json'].includes(part)) || seen.has(key)) fail(`候选附件名称重复或使用保留文件：${name}`);
+      if ([...seen].some(other => key.startsWith(`${other}/`) || other.startsWith(`${key}/`))) fail('候选附件路径相互包含');
+      seen.add(key);
+    }
+    const normalized = Object.fromEntries(Object.entries(files).map(([name, text]) => [name.replaceAll('\\', '/'), text]));
+    return inspectAsset(root, project, { asset_id: asset.asset_id, type: asset.type }, directory, { strict, cache, candidate: { asset, files: normalized } });
+  } catch (error) { errors.push(error.message); }
+  return { asset, errors, warnings, refs };
 }
