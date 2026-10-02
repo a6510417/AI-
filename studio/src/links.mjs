@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { readProject, readSnapshot, registryErrors } from './registry.mjs';
+import { fingerprint, compareFiles, readJSON } from './storage.mjs';
+import { VERSION } from './rules.mjs';
 
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const slash = value => value.replaceAll('\\', '/');
@@ -118,21 +120,67 @@ function resolve(ctx, report, markdown, raw, dependencies) {
 
 function markdownLinks(body) { return [...body.matchAll(/!?\[[^\]\n]*\]\((<[^>\n]+>|[^)\n]*)\)/g)]; }
 
+function workingReport(ctx, entry) {
+  const directory = safe(ctx.root, entry.path), asset = readJSON(path.join(directory, 'asset.json'));
+  if (asset.schema_version !== 1 || asset.project_id !== ctx.registry.project_id || asset.asset_id !== entry.asset_id || asset.type !== entry.type || !VERSION.test(asset.version ?? '')) throw new Error(`${entry.asset_id}：工作资产身份或版本无效`);
+  const files = fingerprint(ctx.root, directory), missingFiles = [];
+  for (const file of asset.data?.files ?? []) {
+    safe(ctx.root, `${entry.path}/${file.path}`);
+    if (!Object.hasOwn(files, file.path)) missingFiles.push(`报告工作附件缺失：${entry.path}/${file.path}`);
+  }
+  const saved = entry.versions.some(item => item.version === asset.version) ? ctx.snapshot(entry.asset_id, asset.version) : null;
+  let unsavedChanges = !saved;
+  if (saved) { try { compareFiles(files, saved.manifest.files, `${entry.asset_id}@${asset.version}`); } catch { unsavedChanges = true; } }
+  const mapping = [...ctx.mappings].sort((a, b) => b.to.length - a.to.length).find(item => entry.path === item.to || entry.path.startsWith(`${item.to}/`));
+  const sourcePath = saved?.manifest.source_path ?? (mapping ? `${mapping.from}${entry.path.slice(mapping.to.length)}` : entry.path);
+  const report = { asset, directory, entry, manifest: { files, source_path: sourcePath }, unsaved_changes: unsavedChanges };
+  const dependencies = new Map();
+  for (const ref of references({ refs: asset.refs, data: asset.data })) for (const [identity, snapshot] of closure(ctx, ref)) dependencies.set(identity, snapshot);
+  return { report, dependencies, errors: missingFiles };
+}
+
+function resolveWorking(ctx, report, markdown, raw, dependencies) {
+  const decoded = decodeLink(raw);
+  if (decoded.external) return decoded;
+  const filename = safe(ctx.root, slash(path.relative(ctx.root, path.resolve(path.dirname(markdown), decoded.file))));
+  const relative = slash(path.relative(ctx.root, filename));
+  // New work links use the current layout; unchanged migrated links keep their authored base.
+  const current = /^\.ip-system\/snapshots\//u.test(relative) || ctx.registry.assets.some(entry => relative === entry.path || relative.startsWith(`${entry.path}/`));
+  const base = current ? report.entry.path : report.manifest.source_path;
+  const mapped = current ? relative : mapOld(ctx, path.posix.normalize(path.posix.join(base, path.posix.dirname(slash(path.relative(report.directory, markdown))), decoded.file)));
+  if (mapped.startsWith(`${report.entry.path}/`)) {
+    const file = mapped.slice(report.entry.path.length + 1);
+    if (!Object.hasOwn(report.manifest.files, file)) throw new Error(`报告工作附件缺失：${mapped}`);
+    const target = safe(ctx.root, mapped);
+    if (!fs.lstatSync(target).isFile()) throw new Error('链接目标不是普通文件');
+    return { source: target, asset_id: report.asset.asset_id, version: report.asset.version, target_kind: 'work' };
+  }
+  const authored = { ...report, manifest: { ...report.manifest, source_path: base } };
+  return { ...resolve(ctx, authored, markdown, raw, dependencies), target_kind: 'snapshot' };
+}
+
 /** Preserve raw link failures and the independently resolved exact-version result. */
 export function auditLinks({ project }) {
   const reports = [], rawBroken = [], resolved = [], unresolved = [], warnings = [], errors = [];
   try {
     const ctx = context(project);
     for (const entry of ctx.registry.assets.filter(item => item.type === 'REPORT' && item.adopted_version)) {
-      const report = ctx.snapshot(entry.asset_id, entry.adopted_version), dependencies = closure(ctx, report.asset);
-      for (const [kind, directory] of [['work', safe(ctx.root, entry.path)], ['snapshot', report.directory]]) {
-        const row = { asset_id: entry.asset_id, version: report.asset.version, kind, links: 0, raw_broken: 0, unresolved: 0 };
+      const adopted = ctx.snapshot(entry.asset_id, entry.adopted_version);
+      const branches = [['snapshot', adopted, closure(ctx, adopted.asset)]];
+      try {
+        const work = workingReport(ctx, entry); errors.push(...work.errors);
+        branches.unshift(['work', work.report, work.dependencies]);
+      } catch (error) { errors.push(`${entry.asset_id} 工作稿：${error.message}`); }
+      for (const [kind, report, dependencies] of branches) {
+        const directory = report.directory;
+        const identity = { asset_id: entry.asset_id, version: report.asset.version, adopted_version: entry.adopted_version, kind, unsaved_changes: kind === 'work' ? report.unsaved_changes : false };
+        const row = { ...identity, links: 0, raw_broken: 0, unresolved: 0 };
         for (const filename of Object.keys(report.manifest.files).filter(name => name.endsWith('.md'))) {
           const markdown = safe(ctx.root, slash(path.relative(ctx.root, path.join(directory, filename))));
           if (!fs.existsSync(markdown)) { errors.push(`报告工作附件缺失：${markdown}`); continue; }
           const body = fs.readFileSync(markdown, 'utf8');
           for (const matched of markdownLinks(body)) {
-            const item = { asset_id: entry.asset_id, version: report.asset.version, kind, file: markdown, line: body.slice(0, matched.index).split('\n').length, raw: matched[1] };
+            const item = { ...identity, file: markdown, line: body.slice(0, matched.index).split('\n').length, raw: matched[1] };
             let counted = false;
             try {
               // Raw existence is measured from the actual document, not the old authored base.
@@ -142,8 +190,8 @@ export function auditLinks({ project }) {
               const rawExists = fs.existsSync(rawFile) && fs.lstatSync(rawFile).isFile();
               row.links++; counted = true;
               if (!rawExists) { row.raw_broken++; rawBroken.push(item); }
-              const answer = resolve(ctx, report, kind === 'work' ? path.join(report.directory, filename) : markdown, matched[1], dependencies);
-              resolved.push({ ...item, raw_exists: rawExists, target: answer.source, target_asset_id: answer.asset_id, target_version: answer.version });
+              const answer = kind === 'work' ? resolveWorking(ctx, report, markdown, matched[1], dependencies) : resolve(ctx, report, markdown, matched[1], dependencies);
+              resolved.push({ ...item, raw_exists: rawExists, target: answer.source, target_asset_id: answer.asset_id, target_version: answer.version, target_kind: answer.target_kind ?? 'snapshot' });
             } catch (error) { if (!counted) row.links++; row.unresolved++; unresolved.push({ ...item, reason: error.message }); }
           }
         }

@@ -317,3 +317,124 @@ test('CLI接受显式reading-views与local/portable模式并拒绝未知模式',
   const invalid = run('render-report', ['--asset', 'IP991-REPORT-001', '--out', 'deliveries/views/CLI错误', '--mode', 'latest']);
   assert.equal(invalid.status, 1); assert.match(JSON.parse(invalid.stdout).errors.join('\n'), /local 或 portable/);
 });
+
+function savedWorkingReport(t) {
+  const f = fixture(t);
+  const media = read(path.join(f.media, 'asset.json'));
+  media.version = '1.0.4'; write(path.join(f.media, 'asset.json'), media);
+  fs.writeFileSync(path.join(f.media, '图像 空格#1.png'), 'candidate media bytes version four');
+  saveVersion({ project: f.project, path: f.mediaPath });
+  const report = read(path.join(f.report, 'asset.json'));
+  report.version = '1.0.4'; report.refs = [ref('MEDIA-001', '1.0.4')];
+  report.data.files = [{ path: '制作报告.md' }, { path: '新增工作稿.md' }, { path: '附件/修订说明.txt' }];
+  write(path.join(f.report, 'asset.json'), report);
+  fs.mkdirSync(path.join(f.report, '附件'));
+  fs.writeFileSync(path.join(f.report, '附件/修订说明.txt'), 'only the new working report owns this attachment');
+  fs.writeFileSync(path.join(f.report, '新增工作稿.md'), '# 新增工作稿\n\n[本稿附件](附件/修订说明.txt)\n');
+  saveVersion({ project: f.project, path: f.reportPath });
+  return f;
+}
+
+test('P05工作稿按真实版本和自身附件审计，采用稿与外部精确依赖不串版', t => {
+  const f = savedWorkingReport(t), before = files(f.project);
+  const audit = auditLinks({ project: f.project });
+  assert.equal(audit.ok, true, [...audit.errors, ...audit.warnings].join('\n'));
+  const work = audit.reports.find(row => row.asset_id === 'IP991-REPORT-001' && row.kind === 'work');
+  assert.equal(work.version, '1.0.4'); assert.equal(work.adopted_version, '1.0.0'); assert.equal(work.unsaved_changes, false);
+  assert.equal(work.links, 2);
+  const adopted = audit.reports.find(row => row.asset_id === 'IP991-REPORT-001' && row.kind === 'snapshot');
+  assert.equal(adopted.version, '1.0.0'); assert.equal(adopted.adopted_version, '1.0.0'); assert.equal(adopted.unsaved_changes, false);
+  const self = audit.resolved.find(item => item.kind === 'work' && path.basename(item.file) === '新增工作稿.md');
+  assert.equal(self.version, '1.0.4'); assert.equal(self.adopted_version, '1.0.0'); assert.equal(self.unsaved_changes, false);
+  assert.equal(self.target_kind, 'work'); assert.equal(self.target_version, '1.0.4');
+  assert.equal(self.target, path.join(f.report, '附件/修订说明.txt'));
+  const workingMedia = audit.resolved.find(item => item.kind === 'work' && item.target_asset_id === 'IP991-MEDIA-001');
+  assert.equal(workingMedia.target_kind, 'snapshot'); assert.equal(workingMedia.target_version, '1.0.4');
+  assert.equal(fs.readFileSync(workingMedia.target, 'utf8'), 'candidate media bytes version four');
+  const adoptedMedia = audit.resolved.find(item => item.kind === 'snapshot' && item.target_asset_id === 'IP991-MEDIA-001');
+  assert.equal(adoptedMedia.version, '1.0.0'); assert.equal(adoptedMedia.target_kind, 'snapshot'); assert.equal(adoptedMedia.target_version, '1.0.0');
+  assert.equal(fs.readFileSync(adoptedMedia.target, 'utf8'), 'test media bytes version one');
+  assert.deepEqual(files(f.project), before);
+});
+
+test('P05迁后工作稿兼容遗留source_path及现行assets链接，新增未保存Markdown也实际扫描', async t => {
+  const f = savedWorkingReport(t);
+  assert.equal((await migrateProject({ project: f.project, to: f.target })).ok, true);
+  const report = path.join(f.target, 'assets/REPORT/IP991-REPORT-001');
+  fs.writeFileSync(path.join(report, '迁后新增.md'), '# 迁后新增\n\n[新目录媒体](../../MEDIA/IP991-MEDIA-001/图像%20空格%231.png)\n[本稿附件](附件/修订说明.txt)\n[旧目录本稿附件](../../00_项目管理/IP991-REPORT-001/附件/修订说明.txt)\n');
+  const before = files(f.target), audit = auditLinks({ project: f.target });
+  assert.equal(audit.ok, true, [...audit.errors, ...audit.warnings].join('\n'));
+  const work = audit.reports.find(row => row.kind === 'work');
+  assert.equal(work.version, '1.0.4'); assert.equal(work.adopted_version, '1.0.0'); assert.equal(work.unsaved_changes, true);
+  const oldLink = audit.resolved.find(item => item.kind === 'work' && path.basename(item.file) === '制作报告.md');
+  assert.equal(oldLink.target_version, '1.0.4'); assert.equal(oldLink.target_kind, 'snapshot');
+  const currentLinks = audit.resolved.filter(item => item.kind === 'work' && path.basename(item.file) === '迁后新增.md');
+  assert.equal(currentLinks.length, 3);
+  const media = currentLinks.find(item => item.target_asset_id === 'IP991-MEDIA-001');
+  assert.equal(media.target_kind, 'snapshot'); assert.equal(media.target_version, '1.0.4'); assert.equal(media.unsaved_changes, true);
+  assert.equal(media.target, path.join(f.target, '.ip-system/snapshots/IP991-MEDIA-001/1.0.4/图像 空格#1.png'));
+  const self = currentLinks.find(item => item.target_asset_id === 'IP991-REPORT-001');
+  assert.equal(self.target_kind, 'work'); assert.equal(self.target, path.join(report, '附件/修订说明.txt'));
+  const oldSelf = currentLinks.find(item => item.raw.startsWith('../../00_项目管理/'));
+  assert.equal(oldSelf.target_kind, 'work'); assert.equal(oldSelf.target_version, '1.0.4');
+  assert.equal(oldSelf.target, path.join(report, '附件/修订说明.txt')); assert.equal(oldSelf.unsaved_changes, true);
+  const adopted = audit.resolved.find(item => item.kind === 'snapshot' && item.target_asset_id === 'IP991-MEDIA-001');
+  assert.equal(adopted.target_version, '1.0.0'); assert.equal(adopted.target_kind, 'snapshot');
+  assert.deepEqual(files(f.target), before);
+});
+
+test('P05未保存版本及同版本字节修改均标未保存，并按实际工作稿检查', async t => {
+  for (const change of ['new-version', 'same-version-bytes']) await t.test(change, t => {
+    const f = savedWorkingReport(t), metadata = read(path.join(f.report, 'asset.json'));
+    if (change === 'new-version') { metadata.version = '1.0.5'; write(path.join(f.report, 'asset.json'), metadata); }
+    else fs.appendFileSync(path.join(f.report, '新增工作稿.md'), '\n[再次核对本稿附件](附件/修订说明.txt)\n');
+    const before = files(f.project), audit = auditLinks({ project: f.project });
+    assert.equal(audit.ok, true, [...audit.errors, ...audit.warnings].join('\n'));
+    const expected = change === 'new-version' ? '1.0.5' : '1.0.4';
+    const work = audit.reports.find(row => row.kind === 'work');
+    assert.equal(work.version, expected); assert.equal(work.adopted_version, '1.0.0'); assert.equal(work.unsaved_changes, true);
+    const own = audit.resolved.filter(item => item.kind === 'work' && path.basename(item.file) === '新增工作稿.md');
+    assert.equal(own.length, change === 'new-version' ? 1 : 2);
+    assert.equal(own.every(item => item.version === expected && item.unsaved_changes && item.target_kind === 'work' && item.target_version === expected), true);
+    const adopted = audit.reports.find(row => row.kind === 'snapshot');
+    assert.equal(adopted.version, '1.0.0'); assert.equal(adopted.unsaved_changes, false);
+    assert.deepEqual(files(f.project), before);
+  });
+});
+
+test('P05工作稿引用丢失附件继续失败，不借已保存候选附件兜底', t => {
+  const f = savedWorkingReport(t);
+  fs.unlinkSync(path.join(f.report, '附件/修订说明.txt'));
+  const before = files(f.project), audit = auditLinks({ project: f.project });
+  assert.equal(audit.ok, false);
+  const missing = audit.unresolved.find(item => item.kind === 'work' && path.basename(item.file) === '新增工作稿.md');
+  assert.ok(missing); assert.equal(missing.version, '1.0.4'); assert.equal(missing.unsaved_changes, true);
+  assert.equal(fs.existsSync(path.join(f.project, '.ip-system/snapshots/IP991-REPORT-001/1.0.4/附件/修订说明.txt')), true);
+  assert.deepEqual(files(f.project), before);
+});
+
+test('P05工作稿未声明依赖和多版本歧义仍拒绝，采用稿依赖不替工作稿补齐', async t => {
+  for (const scenario of ['undeclared', 'ambiguous']) await t.test(scenario, t => {
+    const f = savedWorkingReport(t), metadata = read(path.join(f.report, 'asset.json'));
+    metadata.refs = scenario === 'undeclared' ? [] : [ref('MEDIA-001', '1.0.0'), ref('MEDIA-001', '1.0.4')];
+    write(path.join(f.report, 'asset.json'), metadata);
+    const before = files(f.project), audit = auditLinks({ project: f.project });
+    assert.equal(audit.ok, false);
+    const issue = audit.unresolved.find(item => item.kind === 'work' && path.basename(item.file) === '制作报告.md');
+    assert.ok(issue); assert.equal(issue.version, '1.0.4'); assert.equal(issue.adopted_version, '1.0.0'); assert.equal(issue.unsaved_changes, true);
+    assert.match(issue.reason, scenario === 'undeclared' ? /未列入精确依赖/ : /多个版本/);
+    assert.equal(audit.resolved.some(item => item.kind === 'snapshot' && item.target_asset_id === 'IP991-MEDIA-001' && item.target_version === '1.0.0'), true);
+    assert.deepEqual(files(f.project), before);
+  });
+});
+
+test('P05工作稿固定依赖的冻结字节损坏仍阻断审计，不退回采用媒体或工作图片', t => {
+  const f = savedWorkingReport(t);
+  const snapshot = path.join(f.project, '.ip-system/snapshots/IP991-MEDIA-001/1.0.4/图像 空格#1.png');
+  fs.writeFileSync(snapshot, 'corrupt precise candidate snapshot');
+  const before = files(f.project), audit = auditLinks({ project: f.project });
+  assert.equal(audit.ok, false);
+  assert.match(audit.errors.join('\n'), /冻结|校验|指纹|哈希|摘要|损坏|内容/);
+  assert.equal(fs.readFileSync(path.join(f.media, '图像 空格#1.png'), 'utf8'), 'candidate media bytes version four');
+  assert.deepEqual(files(f.project), before);
+});
